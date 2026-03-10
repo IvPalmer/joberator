@@ -1,0 +1,4 @@
+python-jobspy>=1.1.75
+mcp[cli]>=1.0.0
+requests
+pycryptodome>=3.20.0

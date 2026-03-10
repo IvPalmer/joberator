@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+.env
+*.egg-info/
+dist/
+build/
+.venv/
+mcp/.venv/
+node_modules/
+*.pdf
+resume-updates.md

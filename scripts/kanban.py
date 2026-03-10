@@ -1,0 +1,2327 @@
+"""
+Joberator Dashboard — job search + tracker + settings UI.
+Run: python scripts/kanban.py
+Opens at http://localhost:5151
+"""
+
+import json
+import os
+import sys
+import sqlite3
+import subprocess
+import threading
+import webbrowser
+from datetime import datetime
+from http.server import HTTPServer, BaseHTTPRequestHandler
+from urllib.parse import urlparse, parse_qs
+
+# Add mcp/ to path so we can import matching.py and job_search_server
+_mcp_dir = os.path.join(os.path.dirname(__file__), "..", "mcp")
+sys.path.insert(0, _mcp_dir)
+
+# Auto-relaunch with the MCP venv Python if jobspy isn't available
+_venv_python = os.path.join(_mcp_dir, ".venv", "bin", "python")
+if os.path.exists(_venv_python):
+    try:
+        from jobspy import scrape_jobs  # noqa: F401
+    except ImportError:
+        os.execv(_venv_python, [_venv_python] + sys.argv)
+
+DB_PATH = os.path.expanduser("~/.joberator/jobs.db")
+PROFILE_PATH = os.path.expanduser("~/.joberator/profile.json")
+CONFIG_PATH = os.path.expanduser("~/.joberator/config.json")
+PORT = 5151
+
+VALID_STATUSES = ["interested", "applied", "interviewing", "offered", "rejected", "archived"]
+
+DEFAULT_CONFIG = {
+    "search_defaults": {
+        "is_remote": True,
+        "location": "",
+        "results_wanted": 15,
+        "hours_old": 72,
+        "job_type": "",
+        "min_salary": 0,
+        "sites": "linkedin,indeed,google",
+        "country": "USA",
+        "distance": 50,
+    },
+    "cron_jobs": [],  # [{id, name, search_params, schedule, enabled, last_run}]
+}
+
+
+def load_config():
+    if os.path.exists(CONFIG_PATH):
+        with open(CONFIG_PATH) as f:
+            cfg = json.load(f)
+        # Merge with defaults for any missing keys
+        for k, v in DEFAULT_CONFIG.items():
+            if k not in cfg:
+                cfg[k] = v
+        if isinstance(v, dict):
+            for dk, dv in v.items():
+                if dk not in cfg[k]:
+                    cfg[k][dk] = dv
+        return cfg
+    return dict(DEFAULT_CONFIG)
+
+
+def save_config(cfg):
+    os.makedirs(os.path.dirname(CONFIG_PATH), exist_ok=True)
+    with open(CONFIG_PATH, "w") as f:
+        json.dump(cfg, f, indent=2)
+
+
+def get_jobs():
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    rows = conn.execute("SELECT * FROM jobs ORDER BY updated_at DESC").fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def update_status(job_id, status):
+    if status not in VALID_STATUSES:
+        return False
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute(
+        "UPDATE jobs SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+        (status, job_id),
+    )
+    conn.commit()
+    conn.close()
+    return True
+
+
+def delete_job(job_id):
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute("DELETE FROM jobs WHERE id = ?", (job_id,))
+    conn.commit()
+    conn.close()
+
+
+def save_job(title, company, location, url, salary, source, description):
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute(
+        """INSERT INTO jobs (title, company, location, url, salary, source, description, status, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, 'interested', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)""",
+        (title, company, location, url, salary, source, description),
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_profile():
+    if os.path.exists(PROFILE_PATH):
+        with open(PROFILE_PATH) as f:
+            return json.load(f)
+    return None
+
+
+def run_search(params):
+    """Run a job search using jobspy + scoring engine. Returns list of scored jobs."""
+    from jobspy import scrape_jobs
+    from matching import build_profile_fingerprint, generate_search_queries, score_job
+
+    profile = get_profile()
+    if not profile:
+        return {"error": "No profile found. Sync your LinkedIn profile first."}
+
+    fp = build_profile_fingerprint(profile)
+
+    search_term = params.get("search_term", "")
+    if search_term:
+        queries = [search_term]
+    else:
+        queries = generate_search_queries(fp)
+
+    site_list = [s.strip() for s in params.get("sites", "linkedin,indeed,google").split(",") if s.strip()]
+
+    is_remote = params.get("is_remote", False)
+
+    # Split sites: LinkedIn/ZipRecruiter handle is_remote natively.
+    # Indeed ignores is_remote when hours_old is set — needs "remote" in query.
+    # Google just appends "remote" to query text.
+    native_remote_sites = {"linkedin", "zip_recruiter"}
+    text_remote_sites = {"indeed", "google", "glassdoor"}
+
+    all_jobs = []
+    queries_used = []
+    for query in queries:
+        # Group 1: Sites with native remote filter (clean query)
+        native_sites = [s for s in site_list if s in native_remote_sites]
+        # Group 2: Sites needing "remote" in search text
+        text_sites = [s for s in site_list if s in text_remote_sites]
+
+        search_groups = []
+        if native_sites:
+            search_groups.append((native_sites, query))
+        if text_sites and is_remote:
+            rq = query + " remote" if "remote" not in query.lower() else query
+            search_groups.append((text_sites, rq))
+        elif text_sites:
+            search_groups.append((text_sites, query))
+
+        # If no remote split needed, just search all together
+        if not is_remote:
+            search_groups = [(site_list, query)]
+
+        for sites_group, search_query in search_groups:
+            kwargs = {
+                "site_name": sites_group,
+                "search_term": search_query,
+                "results_wanted": int(params.get("results_wanted", 15)),
+                "hours_old": int(params.get("hours_old", 72)),
+                "country_indeed": params.get("country", "USA"),
+                "linkedin_fetch_description": True,
+            }
+            if params.get("location"):
+                kwargs["location"] = params["location"]
+            if is_remote:
+                kwargs["is_remote"] = True
+            if params.get("job_type"):
+                kwargs["job_type"] = params["job_type"]
+
+            try:
+                import pandas as pd
+                result = scrape_jobs(**kwargs)
+                if not result.empty:
+                    all_jobs.append(result)
+                    queries_used.append({"query": search_query, "count": len(result)})
+            except Exception as e:
+                queries_used.append({"query": search_query, "count": 0, "error": str(e)})
+                continue
+
+    if not all_jobs:
+        return {"jobs": [], "queries": queries_used, "total": 0}
+
+    import pandas as pd
+    jobs = pd.concat(all_jobs, ignore_index=True)
+    if "job_url" in jobs.columns:
+        jobs = jobs.drop_duplicates(subset=["job_url"], keep="first")
+
+    min_salary = int(params.get("min_salary", 0))
+    if min_salary > 0 and "min_amount" in jobs.columns:
+        jobs = jobs[(jobs["min_amount"].isna()) | (jobs["min_amount"] >= min_salary)]
+
+    scored_jobs = []
+    for _, job in jobs.iterrows():
+        desc = str(job.get("description", ""))
+        title = str(job.get("title", ""))
+        total, pct, breakdown = score_job(desc, title, fp)
+
+        min_amt = job.get("min_amount")
+        max_amt = job.get("max_amount")
+        salary_str = ""
+        try:
+            if pd.notna(min_amt) and pd.notna(max_amt):
+                salary_str = f"${min_amt:,.0f} - ${max_amt:,.0f}"
+            elif pd.notna(min_amt):
+                salary_str = f"${min_amt:,.0f}+"
+            elif pd.notna(max_amt):
+                salary_str = f"Up to ${max_amt:,.0f}"
+        except (TypeError, ValueError):
+            pass
+
+        scored_jobs.append({
+            "title": str(job.get("title", "")),
+            "company": str(job.get("company", "")),
+            "location": str(job.get("location", "")),
+            "url": str(job.get("job_url", "")),
+            "salary": salary_str,
+            "source": str(job.get("site", "")),
+            "posted": str(job.get("date_posted", "")),
+            "description": str(job.get("description", ""))[:3000],
+            "score": pct,
+            "breakdown": breakdown,
+        })
+
+    scored_jobs.sort(key=lambda x: x["score"], reverse=True)
+
+    return {
+        "jobs": scored_jobs[:50],
+        "queries": queries_used,
+        "total": len(scored_jobs),
+        "profile": {
+            "name": f"{profile.get('first_name', '')} {profile.get('last_name', '')}".strip(),
+            "skills": len(fp["skills"]),
+            "techs": len(fp["desc_techs"]),
+            "years": fp["years_exp"],
+            "seniority": fp["seniority"],
+        },
+    }
+
+
+# Track running searches
+_search_results = {}
+_search_lock = threading.Lock()
+_search_counter = 0
+
+
+def start_search_async(params):
+    global _search_counter
+    with _search_lock:
+        _search_counter += 1
+        search_id = str(_search_counter)
+        _search_results[search_id] = {"status": "running"}
+
+    def _run():
+        try:
+            result = run_search(params)
+            with _search_lock:
+                _search_results[search_id] = {"status": "done", "result": result}
+        except Exception as e:
+            with _search_lock:
+                _search_results[search_id] = {"status": "error", "error": str(e)}
+
+    t = threading.Thread(target=_run, daemon=True)
+    t.start()
+    return search_id
+
+
+HTML = r"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Joberator</title>
+<style>
+  :root {
+    --bg: #0a0a0c;
+    --surface: #141418;
+    --surface2: #1c1c22;
+    --border: #26262e;
+    --border-hover: #38384a;
+    --text: #eeeef0;
+    --text-dim: #8888a0;
+    --text-faint: #55556a;
+    --accent: #6366f1;
+    --accent-dim: #4f46e5;
+    --accent-glow: rgba(99,102,241,0.12);
+    --green: #22c55e;
+    --green-dim: rgba(34,197,94,0.12);
+    --yellow: #eab308;
+    --yellow-dim: rgba(234,179,8,0.12);
+    --red: #ef4444;
+    --red-dim: rgba(239,68,68,0.12);
+    --purple: #a855f7;
+    --purple-dim: rgba(168,85,247,0.12);
+    --blue: #3b82f6;
+    --blue-dim: rgba(59,130,246,0.12);
+    --interested: #3b82f6;
+    --applied: #a855f7;
+    --interviewing: #eab308;
+    --offered: #22c55e;
+    --rejected: #ef4444;
+    --archived: #52525b;
+    --radius: 10px;
+    --radius-sm: 6px;
+    --radius-lg: 14px;
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Inter', system-ui, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    min-height: 100vh;
+  }
+
+  /* --- NAV --- */
+  nav {
+    display: flex;
+    align-items: center;
+    padding: 0 24px;
+    height: 52px;
+    border-bottom: 1px solid var(--border);
+    gap: 4px;
+    position: sticky;
+    top: 0;
+    background: var(--bg);
+    z-index: 50;
+  }
+
+  .logo {
+    font-size: 15px;
+    font-weight: 700;
+    letter-spacing: -0.5px;
+    margin-right: 24px;
+    color: var(--text);
+  }
+
+  .nav-tab {
+    padding: 8px 14px;
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--text-dim);
+    cursor: pointer;
+    border-radius: var(--radius-sm);
+    transition: all 0.15s;
+    border: none;
+    background: none;
+    user-select: none;
+  }
+
+  .nav-tab:hover { color: var(--text); background: var(--surface); }
+  .nav-tab.active { color: var(--text); background: var(--accent-glow); }
+
+  .nav-right {
+    margin-left: auto;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .profile-badge {
+    font-size: 12px;
+    color: var(--text-dim);
+    padding: 4px 10px;
+    border-radius: 20px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+  }
+
+  /* --- TAB CONTENT --- */
+  .tab-content { display: none; }
+  .tab-content.active { display: block; }
+
+  /* --- SEARCH TAB --- */
+  .search-layout {
+    display: grid;
+    grid-template-columns: 320px 1fr;
+    min-height: calc(100vh - 52px);
+  }
+
+  .search-sidebar {
+    border-right: 1px solid var(--border);
+    padding: 20px;
+    overflow-y: auto;
+    max-height: calc(100vh - 52px);
+    position: sticky;
+    top: 52px;
+  }
+
+  .search-sidebar h3 {
+    font-size: 12px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.6px;
+    color: var(--text-dim);
+    margin-bottom: 12px;
+    margin-top: 20px;
+  }
+
+  .search-sidebar h3:first-child { margin-top: 0; }
+
+  .form-group {
+    margin-bottom: 12px;
+  }
+
+  .form-group label {
+    display: block;
+    font-size: 12px;
+    color: var(--text-dim);
+    margin-bottom: 4px;
+    font-weight: 500;
+  }
+
+  .form-group input[type="text"],
+  .form-group input[type="number"],
+  .form-group select {
+    width: 100%;
+    padding: 8px 10px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    color: var(--text);
+    font-size: 13px;
+    font-family: inherit;
+    outline: none;
+    transition: border-color 0.15s;
+  }
+
+  .form-group input:focus,
+  .form-group select:focus {
+    border-color: var(--accent);
+  }
+
+  .form-group input::placeholder { color: var(--text-faint); }
+
+  .toggle-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 6px 0;
+  }
+
+  .toggle-row span {
+    font-size: 13px;
+    color: var(--text);
+  }
+
+  .toggle {
+    position: relative;
+    width: 36px;
+    height: 20px;
+    cursor: pointer;
+  }
+
+  .toggle input {
+    opacity: 0;
+    width: 0;
+    height: 0;
+  }
+
+  .toggle-slider {
+    position: absolute;
+    inset: 0;
+    background: var(--border);
+    border-radius: 10px;
+    transition: background 0.2s;
+  }
+
+  .toggle-slider::before {
+    content: '';
+    position: absolute;
+    width: 14px;
+    height: 14px;
+    left: 3px;
+    bottom: 3px;
+    background: var(--text);
+    border-radius: 50%;
+    transition: transform 0.2s;
+  }
+
+  .toggle input:checked + .toggle-slider {
+    background: var(--accent);
+  }
+
+  .toggle input:checked + .toggle-slider::before {
+    transform: translateX(16px);
+  }
+
+  .site-chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+
+  .site-chip {
+    padding: 4px 10px;
+    font-size: 12px;
+    border-radius: 20px;
+    border: 1px solid var(--border);
+    background: var(--surface);
+    color: var(--text-dim);
+    cursor: pointer;
+    transition: all 0.15s;
+    user-select: none;
+  }
+
+  .site-chip.active {
+    border-color: var(--accent);
+    background: var(--accent-glow);
+    color: var(--text);
+  }
+
+  .btn {
+    padding: 9px 16px;
+    border-radius: var(--radius-sm);
+    font-size: 13px;
+    font-weight: 600;
+    font-family: inherit;
+    cursor: pointer;
+    border: none;
+    transition: all 0.15s;
+  }
+
+  .btn-primary {
+    background: var(--accent);
+    color: white;
+    width: 100%;
+    margin-top: 16px;
+  }
+
+  .btn-primary:hover { background: var(--accent-dim); }
+
+  .btn-primary:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+
+  .btn-small {
+    padding: 5px 12px;
+    font-size: 12px;
+    font-weight: 500;
+  }
+
+  .btn-ghost {
+    background: none;
+    color: var(--text-dim);
+    border: 1px solid var(--border);
+  }
+
+  .btn-ghost:hover { border-color: var(--border-hover); color: var(--text); }
+
+  .btn-save {
+    background: var(--green-dim);
+    color: var(--green);
+    border: 1px solid transparent;
+  }
+
+  .btn-save:hover { border-color: var(--green); }
+
+  .btn-save.saved {
+    opacity: 0.5;
+    cursor: default;
+  }
+
+  /* --- SEARCH RESULTS --- */
+  .results-area {
+    padding: 20px 24px;
+    overflow-y: auto;
+    max-height: calc(100vh - 52px);
+  }
+
+  .results-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 16px;
+  }
+
+  .results-header h2 {
+    font-size: 16px;
+    font-weight: 600;
+  }
+
+  .results-meta {
+    font-size: 12px;
+    color: var(--text-dim);
+  }
+
+  .queries-bar {
+    display: flex;
+    gap: 6px;
+    flex-wrap: wrap;
+    margin-bottom: 16px;
+  }
+
+  .query-chip {
+    font-size: 11px;
+    padding: 3px 10px;
+    border-radius: 20px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    color: var(--text-dim);
+  }
+
+  .query-chip .count {
+    color: var(--accent);
+    font-weight: 600;
+  }
+
+  .job-card-result {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 16px 18px;
+    margin-bottom: 8px;
+    transition: border-color 0.15s;
+    cursor: pointer;
+  }
+
+  .job-card-result:hover { border-color: var(--border-hover); }
+
+  .job-card-result .top-row {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 12px;
+  }
+
+  .job-card-result .title {
+    font-size: 14px;
+    font-weight: 600;
+    line-height: 1.3;
+  }
+
+  .job-card-result .company-row {
+    font-size: 13px;
+    color: var(--text-dim);
+    margin-top: 3px;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex-wrap: wrap;
+  }
+
+  .score-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    padding: 3px 10px;
+    border-radius: 20px;
+    font-size: 12px;
+    font-weight: 700;
+    white-space: nowrap;
+    flex-shrink: 0;
+  }
+
+  .score-high { background: var(--green-dim); color: var(--green); }
+  .score-mid { background: var(--yellow-dim); color: var(--yellow); }
+  .score-low { background: var(--surface2); color: var(--text-dim); }
+
+  .score-bar {
+    width: 48px;
+    height: 4px;
+    background: var(--border);
+    border-radius: 2px;
+    overflow: hidden;
+  }
+
+  .score-bar-fill {
+    height: 100%;
+    border-radius: 2px;
+    transition: width 0.3s;
+  }
+
+  .match-tags {
+    display: flex;
+    gap: 4px;
+    flex-wrap: wrap;
+    margin-top: 8px;
+  }
+
+  .match-tag {
+    font-size: 11px;
+    padding: 2px 8px;
+    border-radius: 4px;
+    background: var(--surface2);
+    color: var(--text-dim);
+  }
+
+  .match-tag.skill { background: var(--blue-dim); color: var(--blue); }
+  .match-tag.tech { background: var(--purple-dim); color: var(--purple); }
+  .match-tag.domain { background: var(--green-dim); color: var(--green); }
+
+  .job-card-result .meta-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-top: 8px;
+    font-size: 12px;
+    color: var(--text-faint);
+  }
+
+  .meta-row .salary { color: var(--green); font-weight: 500; }
+
+  .job-card-result .actions-row {
+    display: flex;
+    gap: 6px;
+    margin-top: 10px;
+    align-items: center;
+  }
+
+  .spinner {
+    display: inline-block;
+    width: 16px;
+    height: 16px;
+    border: 2px solid var(--border);
+    border-top-color: var(--accent);
+    border-radius: 50%;
+    animation: spin 0.7s linear infinite;
+  }
+
+  .spinner-large {
+    width: 28px;
+    height: 28px;
+    border-width: 3px;
+  }
+
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  .loading-state {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    padding: 80px 20px;
+    gap: 16px;
+    color: var(--text-dim);
+    font-size: 14px;
+  }
+
+  .empty-results {
+    text-align: center;
+    padding: 80px 20px;
+    color: var(--text-dim);
+    font-size: 14px;
+  }
+
+  .empty-results .icon { font-size: 36px; margin-bottom: 12px; }
+
+  /* Profile card in search sidebar */
+  .profile-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 12px 14px;
+    margin-bottom: 16px;
+  }
+
+  .profile-card .profile-name {
+    font-size: 13px;
+    font-weight: 600;
+    margin-bottom: 2px;
+  }
+
+  .profile-card .profile-headline {
+    font-size: 11px;
+    color: var(--text-dim);
+    margin-bottom: 8px;
+    line-height: 1.3;
+  }
+
+  .profile-card .profile-stats {
+    display: flex;
+    gap: 10px;
+    font-size: 11px;
+    color: var(--text-faint);
+    margin-bottom: 8px;
+  }
+
+  .profile-card .profile-stats span {
+    color: var(--text);
+    font-weight: 600;
+  }
+
+  .profile-card .auto-queries {
+    margin-top: 8px;
+    padding-top: 8px;
+    border-top: 1px solid var(--border);
+  }
+
+  .profile-card .auto-queries-label {
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    color: var(--text-faint);
+    margin-bottom: 6px;
+  }
+
+  .profile-card .auto-queries .query-list {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+  }
+
+  .profile-card .auto-queries .aq-chip {
+    font-size: 11px;
+    padding: 2px 8px;
+    border-radius: 4px;
+    background: var(--accent-glow);
+    color: var(--accent);
+  }
+
+  .profile-card .no-profile {
+    font-size: 12px;
+    color: var(--text-faint);
+  }
+
+  .hint {
+    font-size: 10px;
+    color: var(--text-faint);
+    margin-top: 2px;
+    display: block;
+    line-height: 1.3;
+  }
+
+  /* --- BOARD TAB --- */
+  .board {
+    display: flex;
+    gap: 12px;
+    padding: 20px 24px;
+    min-height: calc(100vh - 52px);
+    align-items: flex-start;
+    overflow-x: auto;
+  }
+
+  .column {
+    flex: 1;
+    min-width: 220px;
+    max-width: 300px;
+  }
+
+  .column-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 12px;
+    margin-bottom: 8px;
+    font-size: 12px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    color: var(--text-dim);
+  }
+
+  .column-header .dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+  }
+
+  .column-header .count {
+    margin-left: auto;
+    font-weight: 400;
+    font-size: 11px;
+    opacity: 0.6;
+  }
+
+  .column[data-status="interested"] .dot { background: var(--interested); }
+  .column[data-status="applied"] .dot { background: var(--applied); }
+  .column[data-status="interviewing"] .dot { background: var(--interviewing); }
+  .column[data-status="offered"] .dot { background: var(--offered); }
+  .column[data-status="rejected"] .dot { background: var(--rejected); }
+  .column[data-status="archived"] .dot { background: var(--archived); }
+
+  .drop-zone {
+    min-height: 60px;
+    border-radius: var(--radius);
+    transition: background 0.15s;
+  }
+
+  .drop-zone.drag-over {
+    background: var(--accent-glow);
+  }
+
+  .card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 12px 14px;
+    margin-bottom: 6px;
+    cursor: grab;
+    transition: border-color 0.15s, transform 0.1s, opacity 0.15s;
+    position: relative;
+  }
+
+  .card:hover { border-color: var(--border-hover); }
+  .card:active { cursor: grabbing; }
+  .card.dragging { opacity: 0.4; transform: scale(0.97); }
+
+  .card-title { font-size: 13px; font-weight: 500; line-height: 1.3; margin-bottom: 3px; }
+  .card-company { font-size: 12px; color: var(--text-dim); margin-bottom: 4px; }
+  .card-meta {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 11px;
+    color: var(--text-faint);
+  }
+  .card-salary { color: var(--green); font-weight: 500; }
+
+  .card-actions {
+    position: absolute;
+    top: 8px;
+    right: 8px;
+    display: flex;
+    gap: 4px;
+    opacity: 0;
+    transition: opacity 0.15s;
+  }
+
+  .card:hover .card-actions { opacity: 1; }
+
+  .card-actions button {
+    background: none;
+    border: none;
+    color: var(--text-dim);
+    cursor: pointer;
+    font-size: 13px;
+    padding: 2px 4px;
+    border-radius: 4px;
+    line-height: 1;
+  }
+
+  .card-actions button:hover { color: var(--text); background: var(--border); }
+  .card-actions .delete-btn:hover { color: var(--red); }
+
+  .empty-board {
+    text-align: center;
+    padding: 60px 20px;
+    color: var(--text-dim);
+    font-size: 14px;
+    grid-column: 1 / -1;
+  }
+
+  /* --- SETTINGS TAB --- */
+  .settings-layout {
+    max-width: 640px;
+    margin: 0 auto;
+    padding: 32px 24px;
+  }
+
+  .settings-section {
+    margin-bottom: 32px;
+  }
+
+  .settings-section h2 {
+    font-size: 16px;
+    font-weight: 600;
+    margin-bottom: 4px;
+  }
+
+  .settings-section .desc {
+    font-size: 13px;
+    color: var(--text-dim);
+    margin-bottom: 16px;
+  }
+
+  .settings-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 12px;
+  }
+
+  .settings-grid .full-width {
+    grid-column: 1 / -1;
+  }
+
+  .cron-list {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .cron-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 14px 16px;
+  }
+
+  .cron-card .cron-top {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 8px;
+  }
+
+  .cron-card .cron-name {
+    font-size: 14px;
+    font-weight: 600;
+  }
+
+  .cron-card .cron-schedule {
+    font-size: 12px;
+    color: var(--text-dim);
+    margin-bottom: 4px;
+  }
+
+  .cron-card .cron-params {
+    font-size: 11px;
+    color: var(--text-faint);
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+
+  .cron-card .cron-actions {
+    display: flex;
+    gap: 6px;
+    margin-top: 8px;
+  }
+
+  .cron-modal {
+    display: none;
+    position: fixed;
+    inset: 0;
+    background: rgba(0,0,0,0.6);
+    z-index: 100;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .cron-modal.active { display: flex; }
+
+  .cron-modal-inner {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-lg);
+    width: 90%;
+    max-width: 480px;
+    padding: 24px;
+    max-height: 80vh;
+    overflow-y: auto;
+  }
+
+  .cron-modal-inner h3 {
+    font-size: 16px;
+    font-weight: 600;
+    margin-bottom: 16px;
+  }
+
+  /* --- MODAL (shared) --- */
+  .modal-overlay {
+    display: none;
+    position: fixed;
+    inset: 0;
+    background: rgba(0,0,0,0.6);
+    z-index: 100;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .modal-overlay.active { display: flex; }
+
+  .modal {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-lg);
+    width: 90%;
+    max-width: 560px;
+    max-height: 80vh;
+    overflow-y: auto;
+    padding: 24px;
+  }
+
+  .modal h2 { font-size: 17px; font-weight: 600; margin-bottom: 4px; }
+  .modal .company { font-size: 13px; color: var(--text-dim); margin-bottom: 14px; }
+  .modal .detail { margin-bottom: 12px; }
+  .modal .detail-label {
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    color: var(--text-dim);
+    margin-bottom: 3px;
+  }
+  .modal .detail-value { font-size: 13px; line-height: 1.5; }
+  .modal .detail-value a { color: var(--accent); text-decoration: none; }
+  .modal .detail-value a:hover { text-decoration: underline; }
+  .modal .notes-text { font-size: 12px; color: var(--text-dim); white-space: pre-wrap; line-height: 1.5; }
+
+  /* --- TOAST --- */
+  .toast-container {
+    position: fixed;
+    bottom: 20px;
+    right: 20px;
+    z-index: 200;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+
+  .toast {
+    padding: 10px 16px;
+    border-radius: var(--radius-sm);
+    font-size: 13px;
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    color: var(--text);
+    animation: fadeIn 0.2s;
+    max-width: 320px;
+  }
+
+  .toast.success { border-color: var(--green); }
+  .toast.error { border-color: var(--red); }
+
+  @keyframes fadeIn { from { opacity: 0; transform: translateY(8px); } }
+</style>
+</head>
+<body>
+
+<nav>
+  <div class="logo">Joberator</div>
+  <button class="nav-tab active" data-tab="search" onclick="switchTab('search')">Search</button>
+  <button class="nav-tab" data-tab="board" onclick="switchTab('board')">Board</button>
+  <button class="nav-tab" data-tab="settings" onclick="switchTab('settings')">Settings</button>
+  <div class="nav-right">
+    <span class="profile-badge" id="profile-badge">No profile</span>
+  </div>
+</nav>
+
+<!-- ==================== SEARCH TAB ==================== -->
+<div class="tab-content active" id="tab-search">
+  <div class="search-layout">
+    <div class="search-sidebar">
+      <!-- Profile card -->
+      <div class="profile-card" id="search-profile-card">
+        <div class="no-profile">Loading profile...</div>
+      </div>
+
+      <h3>Search</h3>
+      <div class="form-group">
+        <label>Role / Keywords</label>
+        <input type="text" id="s-term" placeholder="Auto-generated from profile">
+        <span class="hint" id="s-term-hint">Leave empty to search all your profile-matched roles automatically</span>
+      </div>
+
+      <div class="toggle-row">
+        <span>Remote only</span>
+        <label class="toggle">
+          <input type="checkbox" id="s-remote">
+          <span class="toggle-slider"></span>
+        </label>
+      </div>
+
+      <div class="form-group" id="location-group">
+        <label>Location</label>
+        <input type="text" id="s-location" placeholder="Worldwide (leave empty)">
+        <span class="hint">Optional. Leave empty to search globally.</span>
+      </div>
+
+      <h3>Filters</h3>
+      <div class="form-group">
+        <label>Job type</label>
+        <select id="s-jobtype">
+          <option value="">Any</option>
+          <option value="fulltime">Full-time</option>
+          <option value="parttime">Part-time</option>
+          <option value="contract">Contract</option>
+          <option value="internship">Internship</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label>Min salary (USD/yr)</label>
+        <input type="number" id="s-salary" placeholder="0" step="10000">
+      </div>
+      <div class="form-group">
+        <label>Posted within</label>
+        <select id="s-hours">
+          <option value="24">Last 24 hours</option>
+          <option value="72" selected>Last 3 days</option>
+          <option value="168">Last week</option>
+          <option value="336">Last 2 weeks</option>
+          <option value="720">Last month</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label>Results per query</label>
+        <input type="number" id="s-results" value="15" min="5" max="50">
+      </div>
+      <div class="form-group" id="country-group">
+        <label>Search region</label>
+        <select id="s-country">
+          <option value="worldwide" selected>Worldwide</option>
+          <option value="USA">USA</option>
+          <option value="UK">UK</option>
+          <option value="Canada">Canada</option>
+          <option value="Australia">Australia</option>
+          <option value="Brazil">Brazil</option>
+          <option value="Germany">Germany</option>
+          <option value="France">France</option>
+          <option value="India">India</option>
+          <option value="Netherlands">Netherlands</option>
+          <option value="Spain">Spain</option>
+          <option value="Italy">Italy</option>
+          <option value="Mexico">Mexico</option>
+          <option value="Argentina">Argentina</option>
+          <option value="Japan">Japan</option>
+          <option value="Singapore">Singapore</option>
+          <option value="Ireland">Ireland</option>
+        </select>
+        <span class="hint">LinkedIn &amp; Google always search globally. This sets the Indeed/Glassdoor domain. "Worldwide" uses LinkedIn + Google only.</span>
+      </div>
+
+      <h3>Job boards</h3>
+      <div class="site-chips" id="site-chips">
+        <span class="site-chip active" data-site="linkedin">LinkedIn</span>
+        <span class="site-chip active" data-site="indeed">Indeed</span>
+        <span class="site-chip active" data-site="google">Google</span>
+        <span class="site-chip" data-site="glassdoor">Glassdoor</span>
+        <span class="site-chip" data-site="zip_recruiter">ZipRecruiter</span>
+      </div>
+
+      <button class="btn btn-primary" id="search-btn" onclick="runSearch()">
+        Search Jobs
+      </button>
+    </div>
+
+    <div class="results-area" id="results-area">
+      <div class="empty-results">
+        <div class="icon">&#128270;</div>
+        <p>Hit "Search Jobs" to find matches</p>
+        <p style="margin-top:6px;font-size:12px;color:var(--text-faint)">Your profile is used to auto-generate search queries and score every result</p>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ==================== BOARD TAB ==================== -->
+<div class="tab-content" id="tab-board">
+  <div class="board" id="board"></div>
+</div>
+
+<!-- ==================== SETTINGS TAB ==================== -->
+<div class="tab-content" id="tab-settings">
+  <div class="settings-layout">
+    <div class="settings-section">
+      <h2>Search Defaults</h2>
+      <p class="desc">These values pre-fill the search form. Changes save automatically.</p>
+      <div class="settings-grid">
+        <div class="form-group">
+          <label>Default location</label>
+          <input type="text" id="cfg-location" placeholder="e.g. Remote">
+        </div>
+        <div class="form-group">
+          <label>Search region</label>
+          <select id="cfg-country">
+            <option value="worldwide">Worldwide</option>
+            <option value="USA">USA</option>
+            <option value="UK">UK</option>
+            <option value="Canada">Canada</option>
+            <option value="Australia">Australia</option>
+            <option value="Brazil">Brazil</option>
+            <option value="Germany">Germany</option>
+            <option value="France">France</option>
+            <option value="India">India</option>
+            <option value="Netherlands">Netherlands</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label>Results per query</label>
+          <input type="number" id="cfg-results" value="15">
+        </div>
+        <div class="form-group">
+          <label>Posted within (hours)</label>
+          <input type="number" id="cfg-hours" value="72">
+        </div>
+        <div class="form-group">
+          <label>Min salary (USD)</label>
+          <input type="number" id="cfg-salary" value="0" step="10000">
+        </div>
+        <div class="form-group full-width">
+          <label>Default sites (comma-separated)</label>
+          <input type="text" id="cfg-sites" value="linkedin,indeed,google">
+        </div>
+        <div class="form-group full-width">
+          <div class="toggle-row">
+            <span>Remote by default</span>
+            <label class="toggle">
+              <input type="checkbox" id="cfg-remote">
+              <span class="toggle-slider"></span>
+            </label>
+          </div>
+        </div>
+      </div>
+      <button class="btn btn-primary" style="max-width:200px" onclick="saveDefaults()">Save Defaults</button>
+    </div>
+
+    <div class="settings-section">
+      <h2>Scheduled Searches</h2>
+      <p class="desc">Set up automated searches that run on a schedule. Results are saved to your board automatically.</p>
+      <div class="cron-list" id="cron-list"></div>
+      <button class="btn btn-ghost btn-small" style="margin-top:12px" onclick="openCronModal()">+ Add Schedule</button>
+    </div>
+
+    <div class="settings-section">
+      <h2>Profile</h2>
+      <p class="desc">Your LinkedIn profile powers the smart matching engine.</p>
+      <div id="profile-info" style="font-size:13px;color:var(--text-dim)">Loading...</div>
+    </div>
+  </div>
+</div>
+
+<!-- Detail modal (board) -->
+<div class="modal-overlay" id="modal-overlay" onclick="if(event.target===this)closeModal()">
+  <div class="modal" id="modal"></div>
+</div>
+
+<!-- Search result detail modal -->
+<div class="modal-overlay" id="result-modal-overlay" onclick="if(event.target===this)closeResultModal()">
+  <div class="modal" id="result-modal" style="max-width:640px"></div>
+</div>
+
+<!-- Cron modal -->
+<div class="cron-modal" id="cron-modal" onclick="if(event.target===this)closeCronModal()">
+  <div class="cron-modal-inner">
+    <h3 id="cron-modal-title">Add Scheduled Search</h3>
+    <div class="form-group">
+      <label>Name</label>
+      <input type="text" id="cron-name" placeholder="e.g. Daily remote analytics jobs">
+    </div>
+    <div class="form-group">
+      <label>Schedule</label>
+      <select id="cron-schedule">
+        <option value="6h">Every 6 hours</option>
+        <option value="12h">Every 12 hours</option>
+        <option value="daily" selected>Daily</option>
+        <option value="2d">Every 2 days</option>
+        <option value="weekly">Weekly</option>
+      </select>
+    </div>
+    <div class="form-group">
+      <label>Role / Keywords (empty = auto)</label>
+      <input type="text" id="cron-term" placeholder="Leave empty for profile-based search">
+    </div>
+    <div class="form-group">
+      <label>Location</label>
+      <input type="text" id="cron-location">
+    </div>
+    <div class="toggle-row" style="margin-bottom:8px">
+      <span style="font-size:13px">Remote only</span>
+      <label class="toggle">
+        <input type="checkbox" id="cron-remote">
+        <span class="toggle-slider"></span>
+      </label>
+    </div>
+    <div class="form-group">
+      <label>Job type</label>
+      <select id="cron-jobtype">
+        <option value="">Any</option>
+        <option value="fulltime">Full-time</option>
+        <option value="contract">Contract</option>
+      </select>
+    </div>
+    <div class="form-group">
+      <label>Min salary (USD)</label>
+      <input type="number" id="cron-salary" value="0" step="10000">
+    </div>
+    <div class="form-group">
+      <label>Sites (comma-separated)</label>
+      <input type="text" id="cron-sites" value="linkedin,indeed,google">
+    </div>
+    <div class="form-group">
+      <label>Min match score to auto-save (%)</label>
+      <input type="number" id="cron-min-score" value="50" min="0" max="100">
+    </div>
+    <div style="display:flex;gap:8px;margin-top:16px">
+      <button class="btn btn-primary" style="flex:1" onclick="saveCronJob()">Save</button>
+      <button class="btn btn-ghost" onclick="closeCronModal()">Cancel</button>
+    </div>
+  </div>
+</div>
+
+<div class="toast-container" id="toasts"></div>
+
+<script>
+// --- State ---
+const COLUMNS = ['interested', 'applied', 'interviewing', 'offered', 'rejected', 'archived'];
+let boardJobs = [];
+let searchResults = [];
+let config = null;
+let draggedId = null;
+let currentSearchId = null;
+let editingCronId = null;
+
+// --- Init ---
+async function init() {
+  await Promise.all([loadBoardJobs(), loadConfig(), loadProfile(), loadFingerprint()]);
+  applyDefaults();
+}
+
+// --- Tabs ---
+function switchTab(tab) {
+  document.querySelectorAll('.nav-tab').forEach(t => t.classList.toggle('active', t.dataset.tab === tab));
+  document.querySelectorAll('.tab-content').forEach(t => t.classList.toggle('active', t.id === 'tab-' + tab));
+  if (tab === 'board') renderBoard();
+  if (tab === 'settings') renderSettings();
+}
+
+// --- Toast ---
+function toast(msg, type = '') {
+  const el = document.createElement('div');
+  el.className = 'toast ' + type;
+  el.textContent = msg;
+  document.getElementById('toasts').appendChild(el);
+  setTimeout(() => el.remove(), 3500);
+}
+
+// --- Config ---
+async function loadConfig() {
+  const res = await fetch('/api/config');
+  config = await res.json();
+}
+
+function applyDefaults() {
+  if (!config) return;
+  const d = config.search_defaults || {};
+  const $ = id => document.getElementById(id);
+  $('s-location').value = d.location || '';
+  $('s-remote').checked = !!d.is_remote;
+  $('s-salary').value = d.min_salary || '';
+  $('s-hours').value = d.hours_old || 72;
+  $('s-results').value = d.results_wanted || 15;
+  $('s-country').value = d.country || 'worldwide';
+
+  // Set site chips
+  const activeSites = (d.sites || 'linkedin,indeed,google').split(',').map(s=>s.trim());
+  document.querySelectorAll('.site-chip').forEach(chip => {
+    chip.classList.toggle('active', activeSites.includes(chip.dataset.site));
+  });
+}
+
+async function saveDefaults() {
+  const $ = id => document.getElementById(id);
+  config.search_defaults = {
+    location: $('cfg-location').value,
+    country: $('cfg-country').value,
+    results_wanted: parseInt($('cfg-results').value) || 15,
+    hours_old: parseInt($('cfg-hours').value) || 72,
+    min_salary: parseInt($('cfg-salary').value) || 0,
+    sites: $('cfg-sites').value,
+    is_remote: $('cfg-remote').checked,
+  };
+  await fetch('/api/config', {
+    method: 'PUT',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(config)
+  });
+  applyDefaults();
+  toast('Defaults saved', 'success');
+}
+
+// --- Profile ---
+async function loadProfile() {
+  const res = await fetch('/api/profile');
+  const profile = await res.json();
+  const badge = document.getElementById('profile-badge');
+  const info = document.getElementById('profile-info');
+
+  if (profile && profile.first_name) {
+    const name = `${profile.first_name} ${profile.last_name || ''}`.trim();
+    badge.textContent = name;
+    info.innerHTML = `
+      <strong>${esc(name)}</strong><br>
+      ${esc(profile.headline || '')}<br>
+      <span style="color:var(--text-faint)">${(profile.skills || []).length} skills &middot; ${(profile.positions || []).length} positions</span>
+    `;
+  } else {
+    badge.textContent = 'No profile';
+    info.textContent = 'No profile synced. Use Claude to run sync_profile.';
+  }
+}
+
+// --- Fingerprint / Profile card ---
+let fingerprint = null;
+
+async function loadFingerprint() {
+  try {
+    const res = await fetch('/api/fingerprint');
+    fingerprint = await res.json();
+    renderProfileCard();
+  } catch(e) {}
+}
+
+function renderProfileCard() {
+  const card = document.getElementById('search-profile-card');
+  if (!fingerprint || !fingerprint.name) {
+    card.innerHTML = '<div class="no-profile">No LinkedIn profile synced. Use Claude to run <code>sync_profile</code>.</div>';
+    return;
+  }
+
+  const fp = fingerprint;
+  const skillChips = fp.skills.slice(0,8).map(s => `<span class="aq-chip" style="background:var(--blue-dim);color:var(--blue)">${esc(s)}</span>`).join('');
+  const techChips = fp.techs.slice(0,6).map(t => `<span class="aq-chip" style="background:var(--purple-dim);color:var(--purple)">${esc(t)}</span>`).join('');
+  const queryChips = fp.queries.map(q => `<span class="aq-chip">${esc(q)}</span>`).join('');
+
+  card.innerHTML = `
+    <div class="profile-name">${esc(fp.name)}</div>
+    <div class="profile-headline">${esc(fp.headline)}</div>
+    <div class="profile-stats">
+      <div><span>${fp.years_exp}</span>y exp</div>
+      <div><span>${fp.skills.length}</span> skills</div>
+      <div><span>${fp.techs.length}</span> techs</div>
+      ${fp.seniority.length ? '<div>Level: <span>' + esc(fp.seniority.join(', ')) + '</span></div>' : ''}
+    </div>
+    <div style="display:flex;flex-wrap:wrap;gap:3px;margin-bottom:6px">${skillChips}${techChips}</div>
+    <div class="auto-queries">
+      <div class="auto-queries-label">Auto search queries (when role is empty)</div>
+      <div class="query-list">${queryChips}</div>
+    </div>
+  `;
+}
+
+// --- Site chips ---
+document.querySelectorAll('.site-chip').forEach(chip => {
+  chip.addEventListener('click', () => chip.classList.toggle('active'));
+});
+
+// --- Search ---
+function getSearchParams() {
+  const $ = id => document.getElementById(id);
+  const region = $('s-country').value;
+
+  // When "Worldwide", only use globally-capable boards (LinkedIn, Google)
+  let sites;
+  if (region === 'worldwide') {
+    const globalSites = ['linkedin', 'google'];
+    sites = [...document.querySelectorAll('.site-chip.active')]
+      .map(c => c.dataset.site)
+      .filter(s => globalSites.includes(s))
+      .join(',');
+    if (!sites) sites = 'linkedin,google';
+  } else {
+    sites = [...document.querySelectorAll('.site-chip.active')].map(c => c.dataset.site).join(',');
+  }
+
+  return {
+    search_term: $('s-term').value.trim(),
+    location: $('s-location').value.trim(),
+    is_remote: $('s-remote').checked,
+    job_type: $('s-jobtype').value,
+    min_salary: parseInt($('s-salary').value) || 0,
+    hours_old: parseInt($('s-hours').value) || 72,
+    results_wanted: parseInt($('s-results').value) || 15,
+    country: region === 'worldwide' ? 'USA' : region,
+    sites: sites || 'linkedin',
+  };
+}
+
+async function runSearch() {
+  const btn = document.getElementById('search-btn');
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner"></span> Searching...';
+
+  const area = document.getElementById('results-area');
+  area.innerHTML = '<div class="loading-state"><div class="spinner spinner-large"></div><div>Searching job boards...</div><div style="font-size:12px;color:var(--text-faint)">This may take 30-60 seconds</div></div>';
+
+  try {
+    const params = getSearchParams();
+    const startRes = await fetch('/api/search', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(params)
+    });
+    const {search_id} = await startRes.json();
+    currentSearchId = search_id;
+    pollSearch(search_id);
+  } catch (e) {
+    area.innerHTML = `<div class="empty-results"><div class="icon">&#9888;</div><p>Search failed: ${esc(e.message)}</p></div>`;
+    btn.disabled = false;
+    btn.textContent = 'Search Jobs';
+  }
+}
+
+async function pollSearch(id) {
+  const res = await fetch('/api/search/' + id);
+  const data = await res.json();
+
+  if (data.status === 'running') {
+    setTimeout(() => pollSearch(id), 2000);
+    return;
+  }
+
+  const btn = document.getElementById('search-btn');
+  btn.disabled = false;
+  btn.textContent = 'Search Jobs';
+
+  if (data.status === 'error') {
+    document.getElementById('results-area').innerHTML =
+      `<div class="empty-results"><div class="icon">&#9888;</div><p>${esc(data.error)}</p></div>`;
+    return;
+  }
+
+  searchResults = data.result.jobs || [];
+  renderResults(data.result);
+}
+
+function renderResults(data) {
+  const area = document.getElementById('results-area');
+  const jobs = data.jobs || [];
+
+  if (jobs.length === 0) {
+    area.innerHTML = '<div class="empty-results"><div class="icon">&#128566;</div><p>No jobs found. Try adjusting your filters.</p></div>';
+    return;
+  }
+
+  // Get saved URLs to mark already-saved jobs
+  const savedUrls = new Set(boardJobs.map(j => j.url));
+
+  let html = '';
+
+  // Header
+  html += `<div class="results-header">
+    <h2>${data.total} jobs found</h2>
+    <span class="results-meta">${data.profile ? data.profile.name + ' &middot; ' : ''}${data.profile ? data.profile.skills + ' skills, ' + data.profile.techs + ' techs, ' + data.profile.years + 'y exp' : ''}</span>
+  </div>`;
+
+  // Queries
+  if (data.queries && data.queries.length > 0) {
+    html += '<div class="queries-bar">';
+    for (const q of data.queries) {
+      html += `<span class="query-chip">${esc(q.query)} <span class="count">${q.count}</span></span>`;
+    }
+    html += '</div>';
+  }
+
+  // Jobs
+  for (let i = 0; i < jobs.length; i++) {
+    const j = jobs[i];
+    const scoreClass = j.score >= 60 ? 'score-high' : j.score >= 35 ? 'score-mid' : 'score-low';
+    const barColor = j.score >= 60 ? 'var(--green)' : j.score >= 35 ? 'var(--yellow)' : 'var(--text-faint)';
+    const isSaved = savedUrls.has(j.url);
+
+    html += `<div class="job-card-result" onclick="showResultDetail(${i})">
+      <div class="top-row">
+        <div>
+          <div class="title">${esc(j.title)}</div>
+          <div class="company-row">
+            ${esc(j.company)}
+            ${j.location ? ' &middot; ' + esc(j.location) : ''}
+          </div>
+        </div>
+        <span class="score-badge ${scoreClass}">
+          ${j.score}%
+          <span class="score-bar"><span class="score-bar-fill" style="width:${j.score}%;background:${barColor}"></span></span>
+        </span>
+      </div>`;
+
+    // Match tags
+    const bd = j.breakdown || {};
+    const tags = [];
+    if (bd.skills) bd.skills.slice(0,4).forEach(s => tags.push(`<span class="match-tag skill">${esc(s)}</span>`));
+    if (bd.techs) bd.techs.slice(0,4).forEach(t => tags.push(`<span class="match-tag tech">${esc(t)}</span>`));
+    if (bd.domains) bd.domains.slice(0,2).forEach(d => tags.push(`<span class="match-tag domain">${esc(d)}</span>`));
+    if (bd.seniority) tags.push(`<span class="match-tag">${esc(bd.seniority)}</span>`);
+    if (tags.length) html += `<div class="match-tags">${tags.join('')}</div>`;
+
+    // Meta
+    html += `<div class="meta-row">`;
+    if (j.salary) html += `<span class="salary">${esc(j.salary)}</span>`;
+    if (j.source) html += `<span>${esc(j.source)}</span>`;
+    if (j.posted && j.posted !== 'nan') html += `<span>${esc(j.posted)}</span>`;
+    html += `</div>`;
+
+    // Actions
+    html += `<div class="actions-row">
+      <button class="btn btn-save btn-small ${isSaved ? 'saved' : ''}" onclick="event.stopPropagation();saveResult(${i}, this)" ${isSaved ? 'disabled' : ''}>
+        ${isSaved ? 'Saved' : 'Save to Board'}
+      </button>
+      ${j.url ? `<a href="${esc(j.url)}" target="_blank" class="btn btn-ghost btn-small" onclick="event.stopPropagation()">View</a>` : ''}
+      ${j.url ? `<a href="${esc(getApplyUrl(j))}" target="_blank" class="btn btn-small" style="background:var(--accent);color:white" onclick="event.stopPropagation()">Apply</a>` : ''}
+    </div>`;
+
+    html += '</div>';
+  }
+
+  area.innerHTML = html;
+}
+
+function showResultDetail(idx) {
+  const j = searchResults[idx];
+  if (!j) return;
+  const modal = document.getElementById('result-modal');
+  const bd = j.breakdown || {};
+
+  let descHtml = '';
+  if (j.description) {
+    descHtml = esc(j.description).replace(/\n/g, '<br>');
+  }
+
+  modal.innerHTML = `
+    <h2>${esc(j.title)}</h2>
+    <div class="company">${esc(j.company)} ${j.location ? '&middot; ' + esc(j.location) : ''}</div>
+    <div style="margin-bottom:14px">
+      <span class="score-badge ${j.score >= 60 ? 'score-high' : j.score >= 35 ? 'score-mid' : 'score-low'}">
+        ${j.score}% match
+      </span>
+    </div>
+    ${j.salary ? `<div class="detail"><div class="detail-label">Salary</div><div class="detail-value">${esc(j.salary)}</div></div>` : ''}
+    ${j.url ? `<div class="detail"><div class="detail-label">Link</div><div class="detail-value"><a href="${esc(j.url)}" target="_blank">${esc(j.url)}</a></div></div>` : ''}
+    ${j.source ? `<div class="detail"><div class="detail-label">Source</div><div class="detail-value">${esc(j.source)}</div></div>` : ''}
+    ${bd.skills && bd.skills.length ? `<div class="detail"><div class="detail-label">Matching Skills</div><div class="detail-value">${bd.skills.map(s => esc(s)).join(', ')}</div></div>` : ''}
+    ${bd.techs && bd.techs.length ? `<div class="detail"><div class="detail-label">Matching Tech</div><div class="detail-value">${bd.techs.map(t => esc(t)).join(', ')}</div></div>` : ''}
+    ${bd.domains && bd.domains.length ? `<div class="detail"><div class="detail-label">Domain Match</div><div class="detail-value">${bd.domains.map(d => esc(d)).join(', ')}</div></div>` : ''}
+    ${descHtml ? `<div class="detail"><div class="detail-label">Description</div><div class="detail-value" style="font-size:12px;max-height:300px;overflow-y:auto">${descHtml}</div></div>` : ''}
+  `;
+
+  document.getElementById('result-modal-overlay').classList.add('active');
+}
+
+function closeResultModal() {
+  document.getElementById('result-modal-overlay').classList.remove('active');
+}
+
+async function saveResult(idx, btn) {
+  const j = searchResults[idx];
+  if (!j) return;
+  try {
+    await fetch('/api/jobs', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        title: j.title,
+        company: j.company,
+        location: j.location,
+        url: j.url,
+        salary: j.salary,
+        source: j.source,
+        description: j.description,
+      })
+    });
+    btn.textContent = 'Saved';
+    btn.classList.add('saved');
+    btn.disabled = true;
+    toast('Job saved to board', 'success');
+    loadBoardJobs(); // refresh board data
+  } catch(e) {
+    toast('Failed to save', 'error');
+  }
+}
+
+// --- Board ---
+async function loadBoardJobs() {
+  const res = await fetch('/api/jobs');
+  boardJobs = await res.json();
+}
+
+function renderBoard() {
+  const board = document.getElementById('board');
+
+  if (boardJobs.length === 0) {
+    board.innerHTML = '<div class="empty-board"><p style="font-size:28px;margin-bottom:10px">&#9744;</p><p>No jobs saved yet.<br>Search and save jobs from the Search tab.</p></div>';
+    return;
+  }
+
+  board.innerHTML = COLUMNS.map(status => {
+    const col = boardJobs.filter(j => j.status === status);
+    return `
+      <div class="column" data-status="${status}">
+        <div class="column-header">
+          <span class="dot"></span>
+          ${status}
+          <span class="count">${col.length}</span>
+        </div>
+        <div class="drop-zone"
+          ondragover="onDragOver(event)"
+          ondragleave="onDragLeave(event)"
+          ondrop="onDrop(event, '${status}')">
+          ${col.map(j => boardCardHTML(j)).join('')}
+        </div>
+      </div>
+    `;
+  }).join('');
+}
+
+function boardCardHTML(job) {
+  const salary = job.salary || '';
+  const source = job.source || '';
+  const date = job.created_at ? job.created_at.slice(0, 10) : '';
+  return `
+    <div class="card" draggable="true"
+      ondragstart="onDragStart(event, ${job.id})"
+      ondragend="onDragEnd(event)"
+      onclick="showBoardDetail(${job.id})">
+      <div class="card-actions">
+        <button class="delete-btn" onclick="event.stopPropagation();deleteBoardJob(${job.id})" title="Delete">&#x2715;</button>
+      </div>
+      <div class="card-title">${esc(job.title)}</div>
+      <div class="card-company">${esc(job.company)}</div>
+      <div class="card-meta">
+        ${salary ? `<span class="card-salary">${esc(salary)}</span>` : ''}
+        ${source ? `<span>${esc(source)}</span>` : ''}
+        ${date ? `<span>${date}</span>` : ''}
+      </div>
+    </div>
+  `;
+}
+
+function onDragStart(e, id) {
+  draggedId = id;
+  e.target.classList.add('dragging');
+  e.dataTransfer.effectAllowed = 'move';
+}
+function onDragEnd(e) {
+  e.target.classList.remove('dragging');
+  document.querySelectorAll('.drag-over').forEach(el => el.classList.remove('drag-over'));
+}
+function onDragOver(e) {
+  e.preventDefault();
+  e.currentTarget.classList.add('drag-over');
+}
+function onDragLeave(e) {
+  e.currentTarget.classList.remove('drag-over');
+}
+
+async function onDrop(e, status) {
+  e.preventDefault();
+  e.currentTarget.classList.remove('drag-over');
+  if (draggedId === null) return;
+  const job = boardJobs.find(j => j.id === draggedId);
+  if (job && job.status !== status) {
+    job.status = status;
+    renderBoard();
+    await fetch('/api/jobs/' + draggedId, {
+      method: 'PATCH',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({status})
+    });
+  }
+  draggedId = null;
+}
+
+async function deleteBoardJob(id) {
+  if (!confirm('Delete this job?')) return;
+  await fetch('/api/jobs/' + id, {method: 'DELETE'});
+  boardJobs = boardJobs.filter(j => j.id !== id);
+  renderBoard();
+  closeModal();
+}
+
+function showBoardDetail(id) {
+  const job = boardJobs.find(j => j.id === id);
+  if (!job) return;
+  const modal = document.getElementById('modal');
+  const url = job.url ? `<a href="${esc(job.url)}" target="_blank">${esc(job.url)}</a>` : 'N/A';
+  const desc = job.description ? esc(job.description).slice(0, 2000).replace(/\n/g, '<br>') : '';
+
+  modal.innerHTML = `
+    <h2>${esc(job.title)}</h2>
+    <div class="company">${esc(job.company)} ${job.location ? '&middot; ' + esc(job.location) : ''}</div>
+    ${job.salary ? `<div class="detail"><div class="detail-label">Salary</div><div class="detail-value">${esc(job.salary)}</div></div>` : ''}
+    <div class="detail"><div class="detail-label">Link</div><div class="detail-value">${url}</div></div>
+    ${job.source ? `<div class="detail"><div class="detail-label">Source</div><div class="detail-value">${esc(job.source)}</div></div>` : ''}
+    ${desc ? `<div class="detail"><div class="detail-label">Description</div><div class="detail-value" style="font-size:12px">${desc}</div></div>` : ''}
+    ${job.notes ? `<div class="detail"><div class="detail-label">Notes</div><div class="notes-text">${esc(job.notes)}</div></div>` : ''}
+  `;
+  document.getElementById('modal-overlay').classList.add('active');
+}
+
+function closeModal() {
+  document.getElementById('modal-overlay').classList.remove('active');
+}
+
+// --- Settings ---
+function renderSettings() {
+  if (!config) return;
+  const d = config.search_defaults || {};
+  const $ = id => document.getElementById(id);
+  $('cfg-location').value = d.location || '';
+  $('cfg-country').value = d.country || 'worldwide';
+  $('cfg-results').value = d.results_wanted || 15;
+  $('cfg-hours').value = d.hours_old || 72;
+  $('cfg-salary').value = d.min_salary || 0;
+  $('cfg-sites').value = d.sites || 'linkedin,indeed,google';
+  $('cfg-remote').checked = !!d.is_remote;
+
+  renderCronList();
+}
+
+function renderCronList() {
+  const list = document.getElementById('cron-list');
+  const crons = (config.cron_jobs || []);
+
+  if (crons.length === 0) {
+    list.innerHTML = '<div style="font-size:13px;color:var(--text-faint);padding:8px 0">No scheduled searches yet.</div>';
+    return;
+  }
+
+  list.innerHTML = crons.map((c, i) => {
+    const params = c.search_params || {};
+    const tags = [];
+    if (params.search_term) tags.push(params.search_term);
+    if (params.is_remote) tags.push('remote');
+    if (params.location) tags.push(params.location);
+    if (params.min_salary) tags.push('$' + params.min_salary.toLocaleString() + '+');
+    if (params.sites) tags.push(params.sites);
+
+    return `<div class="cron-card">
+      <div class="cron-top">
+        <span class="cron-name">${esc(c.name || 'Search ' + (i+1))}</span>
+        <label class="toggle">
+          <input type="checkbox" ${c.enabled ? 'checked' : ''} onchange="toggleCron(${i}, this.checked)">
+          <span class="toggle-slider"></span>
+        </label>
+      </div>
+      <div class="cron-schedule">${esc(formatSchedule(c.schedule))} ${c.last_run ? '&middot; Last: ' + esc(c.last_run) : ''}</div>
+      <div class="cron-params">${tags.map(t => '<span>' + esc(t) + '</span>').join('')}</div>
+      <div class="cron-params" style="margin-top:2px">
+        ${c.min_score ? '<span>Min score: ' + c.min_score + '%</span>' : ''}
+      </div>
+      <div class="cron-actions">
+        <button class="btn btn-ghost btn-small" onclick="editCron(${i})">Edit</button>
+        <button class="btn btn-ghost btn-small" onclick="runCronNow(${i})">Run Now</button>
+        <button class="btn btn-ghost btn-small" style="color:var(--red)" onclick="deleteCron(${i})">Delete</button>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+function formatSchedule(s) {
+  const map = {'6h': 'Every 6 hours', '12h': 'Every 12 hours', 'daily': 'Daily', '2d': 'Every 2 days', 'weekly': 'Weekly'};
+  return map[s] || s;
+}
+
+function openCronModal(data) {
+  editingCronId = null;
+  const $ = id => document.getElementById(id);
+  $('cron-modal-title').textContent = 'Add Scheduled Search';
+  $('cron-name').value = '';
+  $('cron-schedule').value = 'daily';
+  $('cron-term').value = '';
+  $('cron-location').value = '';
+  $('cron-remote').checked = true;
+  $('cron-jobtype').value = '';
+  $('cron-salary').value = '0';
+  $('cron-sites').value = 'linkedin,indeed,google';
+  $('cron-min-score').value = '50';
+  $('cron-modal').classList.add('active');
+}
+
+function editCron(idx) {
+  const c = config.cron_jobs[idx];
+  if (!c) return;
+  editingCronId = idx;
+  const p = c.search_params || {};
+  const $ = id => document.getElementById(id);
+  $('cron-modal-title').textContent = 'Edit Scheduled Search';
+  $('cron-name').value = c.name || '';
+  $('cron-schedule').value = c.schedule || 'daily';
+  $('cron-term').value = p.search_term || '';
+  $('cron-location').value = p.location || '';
+  $('cron-remote').checked = !!p.is_remote;
+  $('cron-jobtype').value = p.job_type || '';
+  $('cron-salary').value = p.min_salary || 0;
+  $('cron-sites').value = p.sites || 'linkedin,indeed,google';
+  $('cron-min-score').value = c.min_score || 50;
+  $('cron-modal').classList.add('active');
+}
+
+function closeCronModal() {
+  document.getElementById('cron-modal').classList.remove('active');
+  editingCronId = null;
+}
+
+async function saveCronJob() {
+  const $ = id => document.getElementById(id);
+  const cron = {
+    name: $('cron-name').value.trim() || 'Search',
+    schedule: $('cron-schedule').value,
+    enabled: true,
+    min_score: parseInt($('cron-min-score').value) || 50,
+    last_run: null,
+    search_params: {
+      search_term: $('cron-term').value.trim(),
+      location: $('cron-location').value.trim(),
+      is_remote: $('cron-remote').checked,
+      job_type: $('cron-jobtype').value,
+      min_salary: parseInt($('cron-salary').value) || 0,
+      sites: $('cron-sites').value.trim(),
+    }
+  };
+
+  if (editingCronId !== null) {
+    cron.last_run = config.cron_jobs[editingCronId].last_run;
+    config.cron_jobs[editingCronId] = cron;
+  } else {
+    config.cron_jobs = config.cron_jobs || [];
+    config.cron_jobs.push(cron);
+  }
+
+  await fetch('/api/config', {
+    method: 'PUT',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(config)
+  });
+
+  closeCronModal();
+  renderCronList();
+  toast(editingCronId !== null ? 'Schedule updated' : 'Schedule created', 'success');
+}
+
+async function toggleCron(idx, enabled) {
+  config.cron_jobs[idx].enabled = enabled;
+  await fetch('/api/config', {
+    method: 'PUT',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(config)
+  });
+  toast(enabled ? 'Schedule enabled' : 'Schedule paused', 'success');
+}
+
+async function deleteCron(idx) {
+  if (!confirm('Delete this scheduled search?')) return;
+  config.cron_jobs.splice(idx, 1);
+  await fetch('/api/config', {
+    method: 'PUT',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(config)
+  });
+  renderCronList();
+  toast('Schedule deleted');
+}
+
+async function runCronNow(idx) {
+  const c = config.cron_jobs[idx];
+  if (!c) return;
+
+  // Fill search form and run
+  const p = c.search_params || {};
+  const $ = id => document.getElementById(id);
+  $('s-term').value = p.search_term || '';
+  $('s-location').value = p.location || '';
+  $('s-remote').checked = !!p.is_remote;
+  $('s-jobtype').value = p.job_type || '';
+  $('s-salary').value = p.min_salary || '';
+  $('s-hours').value = p.hours_old || 72;
+  if (p.sites) {
+    document.querySelectorAll('.site-chip').forEach(chip => {
+      chip.classList.toggle('active', p.sites.split(',').map(s=>s.trim()).includes(chip.dataset.site));
+    });
+  }
+
+  switchTab('search');
+  runSearch();
+}
+
+// --- Helpers ---
+function esc(str) {
+  if (!str) return '';
+  const d = document.createElement('div');
+  d.textContent = str;
+  return d.innerHTML;
+}
+
+function getApplyUrl(job) {
+  // LinkedIn: add /apply to job URL. Indeed: use the URL directly.
+  const url = job.url || '';
+  if (url.includes('linkedin.com/jobs/view/')) {
+    return url.replace(/\/?$/, '/') + '?trk=apply';
+  }
+  return url;
+}
+
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape') {
+    closeModal();
+    closeResultModal();
+    closeCronModal();
+  }
+});
+
+init();
+</script>
+</body>
+</html>
+"""
+
+
+class Handler(BaseHTTPRequestHandler):
+    def log_message(self, fmt, *args):
+        pass
+
+    def _json(self, data, status=200):
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.end_headers()
+        self.wfile.write(json.dumps(data, default=str).encode())
+
+    def _html(self, html):
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.end_headers()
+        self.wfile.write(html.encode())
+
+    def _read_body(self):
+        length = int(self.headers.get("Content-Length", 0))
+        return json.loads(self.rfile.read(length)) if length else {}
+
+    def do_GET(self):
+        path = urlparse(self.path).path
+
+        if path == "/api/jobs":
+            self._json(get_jobs())
+
+        elif path == "/api/config":
+            self._json(load_config())
+
+        elif path == "/api/profile":
+            profile = get_profile()
+            self._json(profile or {})
+
+        elif path == "/api/fingerprint":
+            profile = get_profile()
+            if profile:
+                from matching import build_profile_fingerprint, generate_search_queries
+                fp = build_profile_fingerprint(profile)
+                queries = generate_search_queries(fp)
+                self._json({
+                    "name": f"{profile.get('first_name', '')} {profile.get('last_name', '')}".strip(),
+                    "headline": profile.get("headline", ""),
+                    "skills": fp["skills"][:12],
+                    "techs": fp["desc_techs"][:12],
+                    "seniority": fp["seniority"],
+                    "years_exp": fp["years_exp"],
+                    "domains": fp["domains"][:6],
+                    "queries": queries,
+                })
+            else:
+                self._json({})
+
+        elif path.startswith("/api/search/"):
+            search_id = path.split("/")[-1]
+            with _search_lock:
+                result = _search_results.get(search_id, {"status": "not_found"})
+            self._json(result)
+
+        else:
+            self._html(HTML)
+
+    def do_POST(self):
+        path = urlparse(self.path).path
+
+        if path == "/api/search":
+            params = self._read_body()
+            search_id = start_search_async(params)
+            self._json({"search_id": search_id})
+
+        elif path == "/api/jobs":
+            body = self._read_body()
+            save_job(
+                body.get("title", ""),
+                body.get("company", ""),
+                body.get("location", ""),
+                body.get("url", ""),
+                body.get("salary", ""),
+                body.get("source", ""),
+                body.get("description", ""),
+            )
+            self._json({"ok": True})
+
+        else:
+            self._json({"error": "not found"}, 404)
+
+    def do_PUT(self):
+        path = urlparse(self.path).path
+
+        if path == "/api/config":
+            cfg = self._read_body()
+            save_config(cfg)
+            self._json({"ok": True})
+        else:
+            self._json({"error": "not found"}, 404)
+
+    def do_PATCH(self):
+        path = urlparse(self.path).path
+        if path.startswith("/api/jobs/"):
+            try:
+                job_id = int(path.split("/")[-1])
+                body = self._read_body()
+                if "status" in body:
+                    update_status(job_id, body["status"])
+                self._json({"ok": True})
+            except (ValueError, json.JSONDecodeError):
+                self._json({"error": "bad request"}, 400)
+        else:
+            self._json({"error": "not found"}, 404)
+
+    def do_DELETE(self):
+        path = urlparse(self.path).path
+        if path.startswith("/api/jobs/"):
+            try:
+                job_id = int(path.split("/")[-1])
+                delete_job(job_id)
+                self._json({"ok": True})
+            except ValueError:
+                self._json({"error": "bad request"}, 400)
+        else:
+            self._json({"error": "not found"}, 404)
+
+    def do_OPTIONS(self):
+        self.send_response(204)
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        self.end_headers()
+
+
+# --- Cron scheduler ---
+def run_cron_scheduler():
+    """Background thread that checks cron jobs and runs them on schedule."""
+    import time
+
+    schedule_seconds = {
+        "6h": 6 * 3600,
+        "12h": 12 * 3600,
+        "daily": 24 * 3600,
+        "2d": 2 * 24 * 3600,
+        "weekly": 7 * 24 * 3600,
+    }
+
+    while True:
+        time.sleep(60)  # Check every minute
+        try:
+            cfg = load_config()
+            now = datetime.now()
+            changed = False
+
+            for cron in cfg.get("cron_jobs", []):
+                if not cron.get("enabled"):
+                    continue
+
+                interval = schedule_seconds.get(cron.get("schedule", "daily"), 86400)
+                last_run = cron.get("last_run")
+
+                should_run = False
+                if not last_run:
+                    should_run = True
+                else:
+                    try:
+                        last_dt = datetime.fromisoformat(last_run)
+                        if (now - last_dt).total_seconds() >= interval:
+                            should_run = True
+                    except (ValueError, TypeError):
+                        should_run = True
+
+                if should_run:
+                    try:
+                        params = cron.get("search_params", {})
+                        result = run_search(params)
+                        min_score = cron.get("min_score", 50)
+
+                        # Auto-save jobs above min_score
+                        saved_urls = set()
+                        try:
+                            for j in get_jobs():
+                                if j.get("url"):
+                                    saved_urls.add(j["url"])
+                        except Exception:
+                            pass
+
+                        saved_count = 0
+                        for job in result.get("jobs", []):
+                            if job["score"] >= min_score and job["url"] not in saved_urls:
+                                save_job(
+                                    job["title"], job["company"], job["location"],
+                                    job["url"], job["salary"], job["source"], job["description"]
+                                )
+                                saved_urls.add(job["url"])
+                                saved_count += 1
+
+                        cron["last_run"] = now.isoformat()[:19]
+                        changed = True
+                        print(f"[cron] Ran '{cron.get('name')}': {len(result.get('jobs',[]))} found, {saved_count} saved")
+                    except Exception as e:
+                        print(f"[cron] Error running '{cron.get('name')}': {e}")
+                        cron["last_run"] = now.isoformat()[:19]
+                        changed = True
+
+            if changed:
+                save_config(cfg)
+        except Exception:
+            pass
+
+
+if __name__ == "__main__":
+    if not os.path.exists(DB_PATH):
+        print(f"Database not found at {DB_PATH}")
+        print("Run job searches via Claude first to create the database.")
+        exit(1)
+
+    # Start cron scheduler in background
+    cron_thread = threading.Thread(target=run_cron_scheduler, daemon=True)
+    cron_thread.start()
+    print("[cron] Scheduler started")
+
+    server = HTTPServer(("127.0.0.1", PORT), Handler)
+    print(f"Joberator Dashboard -> http://localhost:{PORT}")
+    webbrowser.open(f"http://localhost:{PORT}")
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        print("\nStopped.")
