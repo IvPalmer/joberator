@@ -58,12 +58,12 @@ def load_config():
         for k, v in DEFAULT_CONFIG.items():
             if k not in cfg:
                 cfg[k] = v
-        if isinstance(v, dict):
-            for dk, dv in v.items():
-                if dk not in cfg[k]:
-                    cfg[k][dk] = dv
+            elif isinstance(v, dict):
+                for dk, dv in v.items():
+                    if dk not in cfg[k]:
+                        cfg[k][dk] = dv
         return cfg
-    return dict(DEFAULT_CONFIG)
+    return json.loads(json.dumps(DEFAULT_CONFIG))
 
 
 def save_config(cfg):
@@ -80,18 +80,6 @@ def get_jobs():
     return [dict(r) for r in rows]
 
 
-def update_status(job_id, status):
-    if status not in VALID_STATUSES:
-        return False
-    conn = sqlite3.connect(DB_PATH)
-    conn.execute(
-        "UPDATE jobs SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
-        (status, job_id),
-    )
-    conn.commit()
-    conn.close()
-    return True
-
 
 def delete_job(job_id):
     conn = sqlite3.connect(DB_PATH)
@@ -101,14 +89,42 @@ def delete_job(job_id):
 
 
 def save_job(title, company, location, url, salary, source, description):
+    """Save job, returning (True, id) or (False, 'duplicate') if URL exists."""
     conn = sqlite3.connect(DB_PATH)
-    conn.execute(
+    if url:
+        existing = conn.execute("SELECT id FROM jobs WHERE url = ?", (url,)).fetchone()
+        if existing:
+            conn.close()
+            return False, "duplicate"
+    cur = conn.execute(
         """INSERT INTO jobs (title, company, location, url, salary, source, description, status, created_at, updated_at)
            VALUES (?, ?, ?, ?, ?, ?, ?, 'interested', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)""",
         (title, company, location, url, salary, source, description),
     )
+    job_id = cur.lastrowid
     conn.commit()
     conn.close()
+    return True, job_id
+
+
+def update_job(job_id, fields):
+    """Update multiple fields on a job (status, notes)."""
+    conn = sqlite3.connect(DB_PATH)
+    allowed = {"status", "notes"}
+    updates = {k: v for k, v in fields.items() if k in allowed}
+    if "status" in updates and updates["status"] not in VALID_STATUSES:
+        conn.close()
+        return False
+    if updates:
+        set_clause = ", ".join(f"{k} = ?" for k in updates)
+        values = list(updates.values()) + [job_id]
+        conn.execute(
+            f"UPDATE jobs SET {set_clause}, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+            values,
+        )
+        conn.commit()
+    conn.close()
+    return True
 
 
 def get_profile():
@@ -1340,12 +1356,10 @@ HTML = r"""<!DOCTYPE html>
             <span class="toggle-slider"></span>
           </label>
         </div>
-        <div class="form-group" id="location-group">
-          <input type="text" id="s-location" placeholder="Location (leave empty = global)">
-        </div>
+        <input type="hidden" id="s-location" value="">
         <div class="form-row">
           <div class="form-group">
-            <label>Region</label>
+            <label>Market</label>
             <select id="s-country">
               <option value="worldwide">Worldwide</option>
               <option value="USA">USA</option>
@@ -1935,7 +1949,7 @@ async function saveResult(idx, btn) {
   const j = searchResults[idx];
   if (!j) return;
   try {
-    await fetch('/api/jobs', {
+    const res = await fetch('/api/jobs', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({
@@ -1948,11 +1962,19 @@ async function saveResult(idx, btn) {
         description: j.description,
       })
     });
-    btn.textContent = 'Saved';
-    btn.classList.add('saved');
-    btn.disabled = true;
-    toast('Job saved to board', 'success');
-    loadBoardJobs(); // refresh board data
+    const data = await res.json();
+    if (data.ok) {
+      btn.textContent = '✓';
+      btn.classList.add('saved');
+      btn.disabled = true;
+      toast('Job saved to board', 'success');
+      loadBoardJobs();
+    } else {
+      btn.textContent = '✓';
+      btn.classList.add('saved');
+      btn.disabled = true;
+      toast('Already saved', 'success');
+    }
   } catch(e) {
     toast('Failed to save', 'error');
   }
@@ -2067,13 +2089,37 @@ function showBoardDetail(id) {
   modal.innerHTML = `
     <h2>${esc(job.title)}</h2>
     <div class="company">${esc(job.company)} ${job.location ? '&middot; ' + esc(job.location) : ''}</div>
+    <div style="display:flex;gap:8px;margin:10px 0">
+      ${job.url ? `<a href="${esc(job.url)}" target="_blank" class="btn btn-small" style="background:var(--accent);color:white">Apply</a>` : ''}
+      <select onchange="updateJobField(${job.id},'status',this.value)" style="font-size:12px;padding:4px 8px;border-radius:4px;background:var(--surface2);color:var(--text);border:1px solid var(--border)">
+        ${COLUMNS.map(s => `<option value="${s}" ${job.status === s ? 'selected' : ''}>${s}</option>`).join('')}
+      </select>
+    </div>
     ${job.salary ? `<div class="detail"><div class="detail-label">Salary</div><div class="detail-value">${esc(job.salary)}</div></div>` : ''}
-    <div class="detail"><div class="detail-label">Link</div><div class="detail-value">${url}</div></div>
     ${job.source ? `<div class="detail"><div class="detail-label">Source</div><div class="detail-value">${esc(job.source)}</div></div>` : ''}
-    ${desc ? `<div class="detail"><div class="detail-label">Description</div><div class="detail-value" style="font-size:12px">${desc}</div></div>` : ''}
-    ${job.notes ? `<div class="detail"><div class="detail-label">Notes</div><div class="notes-text">${esc(job.notes)}</div></div>` : ''}
+    <div class="detail">
+      <div class="detail-label">Notes</div>
+      <textarea id="job-notes-${job.id}" style="width:100%;min-height:60px;font-size:12px;padding:6px;border-radius:4px;background:var(--surface2);color:var(--text);border:1px solid var(--border);resize:vertical"
+        onblur="updateJobField(${job.id},'notes',this.value)"
+        placeholder="Add notes...">${esc(job.notes || '')}</textarea>
+    </div>
+    ${desc ? `<div class="detail"><div class="detail-label">Description</div><div class="detail-value" style="font-size:12px;max-height:300px;overflow-y:auto">${desc}</div></div>` : ''}
   `;
   document.getElementById('modal-overlay').classList.add('active');
+}
+
+async function updateJobField(id, field, value) {
+  await fetch('/api/jobs/' + id, {
+    method: 'PATCH',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({[field]: value})
+  });
+  const job = boardJobs.find(j => j.id === id);
+  if (job) {
+    job[field] = value;
+    renderBoard();
+  }
+  if (field === 'status') toast('Status updated', 'success');
 }
 
 function closeModal() {
@@ -2090,7 +2136,7 @@ function renderSettings() {
   $('cfg-results').value = d.results_wanted || 15;
   $('cfg-hours').value = d.hours_old || 4320;
   $('cfg-salary').value = d.min_salary || 0;
-  $('cfg-sites').value = d.sites || 'linkedin,indeed,google';
+  $('cfg-sites').value = d.sites || 'linkedin,indeed,google,gupy,vagas';
   $('cfg-remote').checked = !!d.is_remote;
 
   renderCronList();
@@ -2152,7 +2198,7 @@ function openCronModal(data) {
   $('cron-remote').checked = true;
   $('cron-jobtype').value = '';
   $('cron-salary').value = '0';
-  $('cron-sites').value = 'linkedin,indeed,google';
+  $('cron-sites').value = 'linkedin,indeed,google,gupy,vagas';
   $('cron-min-score').value = '50';
   $('cron-modal').classList.add('active');
 }
@@ -2171,7 +2217,7 @@ function editCron(idx) {
   $('cron-remote').checked = !!p.is_remote;
   $('cron-jobtype').value = p.job_type || '';
   $('cron-salary').value = p.min_salary || 0;
-  $('cron-sites').value = p.sites || 'linkedin,indeed,google';
+  $('cron-sites').value = p.sites || 'linkedin,indeed,google,gupy,vagas';
   $('cron-min-score').value = c.min_score || 50;
   $('cron-modal').classList.add('active');
 }
@@ -2363,7 +2409,7 @@ class Handler(BaseHTTPRequestHandler):
 
         elif path == "/api/jobs":
             body = self._read_body()
-            save_job(
+            ok, result = save_job(
                 body.get("title", ""),
                 body.get("company", ""),
                 body.get("location", ""),
@@ -2372,7 +2418,10 @@ class Handler(BaseHTTPRequestHandler):
                 body.get("source", ""),
                 body.get("description", ""),
             )
-            self._json({"ok": True})
+            if ok:
+                self._json({"ok": True, "id": result})
+            else:
+                self._json({"ok": False, "error": result}, 409)
 
         else:
             self._json({"error": "not found"}, 404)
@@ -2393,8 +2442,7 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 job_id = int(path.split("/")[-1])
                 body = self._read_body()
-                if "status" in body:
-                    update_status(job_id, body["status"])
+                update_job(job_id, body)
                 self._json({"ok": True})
             except (ValueError, json.JSONDecodeError):
                 self._json({"error": "bad request"}, 400)
@@ -2477,12 +2525,13 @@ def run_cron_scheduler():
                         saved_count = 0
                         for job in result.get("jobs", []):
                             if job["score"] >= min_score and job["url"] not in saved_urls:
-                                save_job(
+                                ok, _ = save_job(
                                     job["title"], job["company"], job["location"],
                                     job["url"], job["salary"], job["source"], job["description"]
                                 )
-                                saved_urls.add(job["url"])
-                                saved_count += 1
+                                if ok:
+                                    saved_urls.add(job["url"])
+                                    saved_count += 1
 
                         cron["last_run"] = now.isoformat()[:19]
                         changed = True
@@ -2498,11 +2547,24 @@ def run_cron_scheduler():
             pass
 
 
+def _ensure_schema():
+    """Ensure DB has all required columns (safe migration)."""
+    conn = sqlite3.connect(DB_PATH)
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(jobs)").fetchall()}
+    if "notes" not in cols:
+        conn.execute("ALTER TABLE jobs ADD COLUMN notes TEXT DEFAULT ''")
+        conn.commit()
+        print("[db] Added 'notes' column")
+    conn.close()
+
+
 if __name__ == "__main__":
     if not os.path.exists(DB_PATH):
         print(f"Database not found at {DB_PATH}")
         print("Run job searches via Claude first to create the database.")
         exit(1)
+
+    _ensure_schema()
 
     # Start cron scheduler in background
     cron_thread = threading.Thread(target=run_cron_scheduler, daemon=True)

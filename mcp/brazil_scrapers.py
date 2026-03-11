@@ -55,6 +55,10 @@ def search_gupy(query, results_wanted=15, is_remote=False, location=""):
 
             job_url = item.get("jobUrl", "")
 
+            # Skip inactive listings with broken URLs
+            if "&" in job_url.split("?")[0] or "inactive.gupy.io" in job_url:
+                continue
+
             jobs.append({
                 "title": item.get("name", ""),
                 "company": item.get("careerPageName", ""),

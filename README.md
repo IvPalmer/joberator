@@ -1,80 +1,97 @@
 # Joberator
 
-Job search and auto-apply automation for Claude Code.
+Job search automation platform with smart matching, powered by Claude Code.
 
-Search LinkedIn, Indeed, Glassdoor, ZipRecruiter, and Google Jobs directly from Claude Code — then optionally auto-apply to LinkedIn Easy Apply jobs.
+Search LinkedIn, Indeed, Google Jobs, Gupy, and Vagas.com.br — with profile-based scoring and a visual dashboard.
 
 ## Quick Start
 
 ```bash
-git clone https://github.com/YOUR_USER/joberator.git
+git clone https://github.com/IvPalmer/joberator.git
 cd joberator
 bash scripts/install.sh
 ```
 
-Then start a new Claude Code session:
-
-```
-> Find me remote fullstack developer jobs paying over $150k
-> Search for data engineer positions in Austin, TX posted in the last 24 hours
-> Look for senior Python developer roles at companies hiring right now
-```
-
-## What It Does
-
-### Job Search (MCP Server)
-- Searches **5 job boards simultaneously**: LinkedIn, Indeed, Glassdoor, ZipRecruiter, Google Jobs
-- **No login required** — scrapes public job listings
-- **Zero ban risk** — no account interaction
-- Filters by: keywords, location, salary, remote, job type, recency
-- Returns structured results with title, company, salary, URL, description
-
-### Auto Apply (Optional)
-- Automates **LinkedIn Easy Apply** using browser automation
-- Uses `undetected-chromedriver` for stealth
-- Optional LLM integration for answering screening questions
-- Powered by [GodsScion/Auto_job_applier_linkedIn](https://github.com/GodsScion/Auto_job_applier_linkedIn)
+## Dashboard
 
 ```bash
-bash scripts/setup-auto-apply.sh
+python scripts/kanban.py
 ```
 
-## Prerequisites
+Opens at `http://localhost:5151` with:
+- **Search tab** — Search 5 platforms simultaneously, results scored against your profile
+- **Board tab** — Kanban board to track applications (interested → applied → interviewing → offered)
+- **Settings tab** — Search defaults, scheduled searches, profile info
 
-- Python 3.10+
-- Claude Code CLI
-- Google Chrome (for auto-apply only)
+## Features
+
+### Multi-Platform Search
+- **LinkedIn** — Global remote + regional results
+- **Indeed** — Regional (e.g., br.indeed.com for Brazil)
+- **Google Jobs** — Aggregated listings
+- **Gupy** — Brazilian tech job platform (public API)
+- **Vagas.com.br** — Brazilian job board (web scraping)
+
+### Smart Matching
+- Auto-generates search queries from your LinkedIn profile
+- Scores every result by skill match, tech overlap, seniority, and domain relevance
+- Color-coded match percentages (high/mid/low)
+
+### Application Tracking
+- Save jobs from search results to your board
+- Drag-and-drop kanban: interested → applied → interviewing → offered → rejected → archived
+- Notes on each job card
+- URL deduplication (no double-saves)
+
+### Scheduled Searches
+- Set up cron-style automated searches (6h, 12h, daily, 2d, weekly)
+- Auto-saves jobs above a configurable match score threshold
+- Runs in background while dashboard is open
+
+### LinkedIn Integration
+- Reads `li_at` cookie from Chrome/Brave (macOS Keychain decryption)
+- Profile sync via Voyager API for skill extraction and matching
+- Easy Apply detection on LinkedIn jobs
 
 ## Project Structure
 
 ```
 joberator/
   mcp/
-    job_search_server.py    # MCP server for job search
+    job_search_server.py    # MCP server with all tools
+    linkedin_auth.py        # Chrome cookie extraction + decryption
+    matching.py             # Profile fingerprinting + job scoring
+    brazil_scrapers.py      # Gupy + Vagas.com.br scrapers
     requirements.txt
-  skills/
-    search-jobs/SKILL.md    # Claude Code skill for job search
-    auto-apply/SKILL.md     # Claude Code skill for auto-apply
   scripts/
+    kanban.py               # Dashboard (search + board + settings)
     install.sh              # One-command installer
-    setup-auto-apply.sh     # Auto-apply bot setup
-    uninstall.sh            # Clean uninstall
 ```
 
-## Auto-Apply Safety
+## Prerequisites
 
-LinkedIn automation violates their Terms of Service. To minimize risk:
+- Python 3.10+
+- Claude Code CLI
+- Google Chrome/Brave with LinkedIn session (for profile sync)
 
-- Keep applications under **15-20 per day**
-- Use `stealth_mode = True` in settings
-- Set conservative `click_gap` (5+ seconds)
-- Consider using a LinkedIn Premium account (gets warnings before bans)
-- Monitor the bot's activity regularly
+## Future: LinkedIn Profile Update
 
-## Uninstall
+The Voyager API (LinkedIn's internal API) supports profile editing via the same `li_at` cookie used for reading. This could enable programmatic updates to headline, summary, skills, and experience.
 
-```bash
-bash scripts/uninstall.sh
-```
+### Approach
+1. Intercept Chrome DevTools network requests while editing profile fields
+2. Capture Voyager API endpoints, methods, headers, and JSON payloads
+3. Replay requests with `li_at` cookie + CSRF token (`JSESSIONID`)
 
-Removes MCP server config, skill symlinks, and optionally the auto-apply bot.
+### Known Details
+- Endpoints are under `/voyager/api/identity/` (POST/PATCH)
+- Requires both `li_at` and `JSESSIONID` cookies
+- Risk level: low-medium for infrequent edits to your own profile
+- No existing Python library supports this — would need custom implementation
+
+### Use Cases
+- Auto-update headline to match target roles
+- Sync skills from resume to LinkedIn
+- Bulk update experience descriptions with keyword optimization
+
+This is documented for future implementation. The official LinkedIn Profile Edit API exists but is gated behind LinkedIn's Partner Program (inaccessible to individual developers).
