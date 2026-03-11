@@ -1,10 +1,17 @@
 # Joberator
 
-Job search automation platform with smart matching, powered by Claude Code.
+Job search automation platform with smart matching and a visual dashboard.
 
-Search LinkedIn, Indeed, Google Jobs, Gupy, and Vagas.com.br — with profile-based scoring and a visual dashboard.
+Search LinkedIn, Indeed, Google Jobs, Gupy, and Vagas.com.br — with profile-based scoring and application tracking.
 
-## Quick Start
+## Setup
+
+### Prerequisites
+- Python 3.10+
+- Google Chrome or Brave with an active LinkedIn session (for profile sync)
+- macOS (LinkedIn cookie extraction uses Keychain — Linux support not yet implemented)
+
+### Install
 
 ```bash
 git clone https://github.com/IvPalmer/joberator.git
@@ -12,13 +19,39 @@ cd joberator
 bash scripts/install.sh
 ```
 
-## Dashboard
+This will:
+1. Create a Python venv and install dependencies
+2. Initialize the jobs database at `~/.joberator/jobs.db`
+3. Print next steps for profile sync and dashboard
+
+### Sync Your LinkedIn Profile
+
+The matching engine needs your LinkedIn profile to score results. You must be logged into LinkedIn in Chrome or Brave.
 
 ```bash
-python scripts/kanban.py
+# This reads your li_at cookie from Chrome and syncs your profile via LinkedIn's API.
+# First run will trigger a macOS Keychain access prompt — click "Allow".
+cd joberator
+mcp/.venv/bin/python3 -c "
+from linkedin_auth import refresh_cookies
+from job_search_server import sync_profile
+refresh_cookies()
+print(sync_profile())
+"
 ```
 
-Opens at `http://localhost:5151` with:
+Your profile is saved to `~/.joberator/profile.json`. Re-run this if you update your LinkedIn profile.
+
+### Start the Dashboard
+
+```bash
+python3 scripts/kanban.py
+```
+
+Opens at `http://localhost:5151`.
+
+## Dashboard
+
 - **Search tab** — Search 5 platforms simultaneously, results scored against your profile
 - **Board tab** — Kanban board to track applications (interested → applied → interviewing → offered)
 - **Settings tab** — Search defaults, scheduled searches, profile info
@@ -42,9 +75,10 @@ Opens at `http://localhost:5151` with:
 - Drag-and-drop kanban: interested → applied → interviewing → offered → rejected → archived
 - Notes on each job card
 - URL deduplication (no double-saves)
+- Apply button and status changes directly from job detail modal
 
 ### Scheduled Searches
-- Set up cron-style automated searches (6h, 12h, daily, 2d, weekly)
+- Set up automated searches from the Settings tab (6h, 12h, daily, 2d, weekly)
 - Auto-saves jobs above a configurable match score threshold
 - Runs in background while dashboard is open
 
@@ -52,6 +86,20 @@ Opens at `http://localhost:5151` with:
 - Reads `li_at` cookie from Chrome/Brave (macOS Keychain decryption)
 - Profile sync via Voyager API for skill extraction and matching
 - Easy Apply detection on LinkedIn jobs
+
+## Claude Code Integration (Optional)
+
+If you use [Claude Code](https://claude.ai/claude-code), you can add the MCP server for natural language job searching:
+
+```bash
+claude mcp add joberator-jobs -s user -- /path/to/joberator/mcp/.venv/bin/python3 /path/to/joberator/mcp/job_search_server.py
+```
+
+Then in Claude Code:
+```
+> Find me remote data engineer jobs paying over $100k
+> Search for senior Python developer roles posted this week
+```
 
 ## Project Structure
 
@@ -68,11 +116,26 @@ joberator/
     install.sh              # One-command installer
 ```
 
-## Prerequisites
+## Data Storage
 
-- Python 3.10+
-- Claude Code CLI
-- Google Chrome/Brave with LinkedIn session (for profile sync)
+All data is stored locally in `~/.joberator/`:
+- `jobs.db` — SQLite database with saved jobs and statuses
+- `profile.json` — Your synced LinkedIn profile
+- `config.json` — Search defaults and scheduled search configs
+
+## Troubleshooting
+
+**"Database not found" on dashboard start**
+Run `bash scripts/install.sh` to initialize the database.
+
+**No search results / only LinkedIn results**
+Make sure all platforms are selected (colored chips in the sidebar). Brazilian platforms (Gupy, Vagas) need Market set to "Brazil".
+
+**LinkedIn cookie errors**
+Re-open LinkedIn in Chrome, make sure you're logged in, then re-run the profile sync command. The `li_at` cookie expires periodically.
+
+**macOS Keychain prompt keeps appearing**
+Click "Always Allow" when prompted to grant access to Chrome Safe Storage.
 
 ## Future: LinkedIn Profile Update
 
@@ -93,5 +156,3 @@ The Voyager API (LinkedIn's internal API) supports profile editing via the same 
 - Auto-update headline to match target roles
 - Sync skills from resume to LinkedIn
 - Bulk update experience descriptions with keyword optimization
-
-This is documented for future implementation. The official LinkedIn Profile Edit API exists but is gated behind LinkedIn's Partner Program (inaccessible to individual developers).
