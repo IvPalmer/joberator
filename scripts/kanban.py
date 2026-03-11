@@ -136,16 +136,16 @@ def run_search(params):
     else:
         queries = generate_search_queries(fp)
 
-    site_list = [s.strip() for s in params.get("sites", "linkedin,indeed,google").split(",") if s.strip()]
+    site_list = [s.strip() for s in params.get("sites", "linkedin,indeed,google,gupy,vagas").split(",") if s.strip()]
 
     is_remote = params.get("is_remote", False)
     results_wanted = int(params.get("results_wanted", 15))
 
     # Separate Brazilian scrapers from jobspy sites
     brazil_sites = {"gupy", "vagas"}
-    jobspy_sites = {"linkedin", "zip_recruiter", "indeed", "google", "glassdoor"}
-    native_remote_sites = {"linkedin", "zip_recruiter"}
-    text_remote_sites = {"indeed", "google", "glassdoor"}
+    jobspy_sites = {"linkedin", "indeed", "google"}
+    native_remote_sites = {"linkedin"}
+    text_remote_sites = {"indeed", "google"}
 
     br_site_list = [s for s in site_list if s in brazil_sites]
     js_site_list = [s for s in site_list if s in jobspy_sites]
@@ -396,8 +396,6 @@ HTML = r"""<!DOCTYPE html>
     --src-linkedin: #0a66c2;
     --src-indeed: #ff5a1f;
     --src-google: #34a853;
-    --src-glassdoor: #00a162;
-    --src-zip_recruiter: #5ba829;
     --src-gupy: #f22d8a;
     --src-vagas: #ff6600;
   }
@@ -622,8 +620,6 @@ HTML = r"""<!DOCTYPE html>
   .site-chip.active[data-site="linkedin"] { background: var(--src-linkedin); }
   .site-chip.active[data-site="indeed"] { background: var(--src-indeed); }
   .site-chip.active[data-site="google"] { background: var(--src-google); }
-  .site-chip.active[data-site="glassdoor"] { background: var(--src-glassdoor); }
-  .site-chip.active[data-site="zip_recruiter"] { background: var(--src-zip_recruiter); }
   .site-chip.active[data-site="gupy"] { background: var(--src-gupy); }
   .site-chip.active[data-site="vagas"] { background: var(--src-vagas); }
 
@@ -773,8 +769,6 @@ HTML = r"""<!DOCTYPE html>
   .job-card-result[data-source="linkedin"] { border-left-color: var(--src-linkedin); }
   .job-card-result[data-source="indeed"] { border-left-color: var(--src-indeed); }
   .job-card-result[data-source="google"] { border-left-color: var(--src-google); }
-  .job-card-result[data-source="glassdoor"] { border-left-color: var(--src-glassdoor); }
-  .job-card-result[data-source="zip_recruiter"] { border-left-color: var(--src-zip_recruiter); }
   .job-card-result[data-source="gupy"] { border-left-color: var(--src-gupy); }
   .job-card-result[data-source="vagas"] { border-left-color: var(--src-vagas); }
 
@@ -961,31 +955,11 @@ HTML = r"""<!DOCTYPE html>
     border-top: 1px solid var(--border);
   }
 
-  .profile-card .profile-headline {
-    font-size: 10px;
-    color: var(--text-dim);
-    margin-bottom: 6px;
-    line-height: 1.3;
-  }
-
-  .profile-card .profile-stats {
-    display: flex;
-    gap: 8px;
-    font-size: 10px;
-    color: var(--text-faint);
-    margin-bottom: 6px;
-  }
-
-  .profile-card .profile-stats span {
-    color: var(--text);
-    font-weight: 600;
-  }
-
   .profile-skills-cloud {
     display: flex;
     flex-wrap: wrap;
     gap: 3px;
-    margin-bottom: 6px;
+    margin-bottom: 8px;
   }
 
   .profile-skills-cloud .skill-tag {
@@ -996,13 +970,7 @@ HTML = r"""<!DOCTYPE html>
     color: var(--accent);
   }
 
-  .profile-card .auto-queries {
-    margin-top: 6px;
-    padding-top: 6px;
-    border-top: 1px solid var(--border);
-  }
-
-  .profile-card .auto-queries-label {
+  .profile-searches-label {
     font-size: 9px;
     text-transform: uppercase;
     letter-spacing: 0.5px;
@@ -1010,18 +978,24 @@ HTML = r"""<!DOCTYPE html>
     margin-bottom: 4px;
   }
 
-  .profile-card .auto-queries .query-list {
+  .profile-searches {
     display: flex;
     flex-wrap: wrap;
     gap: 3px;
   }
 
-  .profile-card .auto-queries .aq-chip {
+  .search-query-chip {
     font-size: 10px;
-    padding: 1px 6px;
+    padding: 2px 7px;
     border-radius: 3px;
     background: var(--surface2);
     color: var(--text-dim);
+    cursor: pointer;
+    transition: background 0.15s;
+  }
+  .search-query-chip:hover {
+    background: var(--accent-glow);
+    color: var(--accent);
   }
 
   .profile-card .no-profile {
@@ -1436,8 +1410,6 @@ HTML = r"""<!DOCTYPE html>
           <span class="site-chip active" data-site="linkedin">LinkedIn</span>
           <span class="site-chip active" data-site="indeed">Indeed</span>
           <span class="site-chip active" data-site="google">Google</span>
-          <span class="site-chip" data-site="glassdoor">Glassdoor</span>
-          <span class="site-chip" data-site="zip_recruiter">ZipRecruiter</span>
           <span class="site-chip active" data-site="gupy">Gupy</span>
           <span class="site-chip active" data-site="vagas">Vagas.com.br</span>
         </div>
@@ -1513,7 +1485,7 @@ HTML = r"""<!DOCTYPE html>
         </div>
         <div class="form-group full-width">
           <label>Default sites (comma-separated)</label>
-          <input type="text" id="cfg-sites" value="linkedin,indeed,google">
+          <input type="text" id="cfg-sites" value="linkedin,indeed,google,gupy,vagas">
         </div>
         <div class="form-group full-width">
           <div class="toggle-row">
@@ -1600,7 +1572,7 @@ HTML = r"""<!DOCTYPE html>
     </div>
     <div class="form-group">
       <label>Sites (comma-separated)</label>
-      <input type="text" id="cron-sites" value="linkedin,indeed,google">
+      <input type="text" id="cron-sites" value="linkedin,indeed,google,gupy,vagas">
     </div>
     <div class="form-group">
       <label>Min match score to auto-save (%)</label>
@@ -1732,25 +1704,21 @@ function renderProfileCard() {
   }
 
   const fp = fingerprint;
-  const skillTags = fp.skills.slice(0,6).map(s => `<span class="skill-tag">${esc(s)}</span>`).join('');
-  const techTags = fp.techs.slice(0,4).map(t => `<span class="skill-tag" style="background:var(--purple-dim);color:var(--purple)">${esc(t)}</span>`).join('');
-  const queryChips = fp.queries.map(q => `<span class="aq-chip">${esc(q)}</span>`).join('');
+  const topSkills = [...new Set([...fp.skills, ...fp.techs])];
+  const skillTags = topSkills.map(s => `<span class="skill-tag">${esc(s)}</span>`).join('');
 
   card.innerHTML = `
     <div class="profile-header" onclick="this.parentElement.classList.toggle('collapsed')">
       <div>
         <div class="profile-name">${esc(fp.name)}</div>
-        <div class="profile-brief">${fp.years_exp}y &middot; ${fp.skills.length} skills &middot; ${fp.seniority.length ? esc(fp.seniority[0]) : ''}</div>
+        <div class="profile-brief">${fp.seniority.length ? esc(fp.seniority[0]) : ''} &middot; ${fp.years_exp}y exp</div>
       </div>
       <span class="profile-toggle-icon">&#9660;</span>
     </div>
     <div class="profile-details">
-      <div class="profile-headline">${esc(fp.headline)}</div>
-      <div class="profile-skills-cloud">${skillTags}${techTags}</div>
-      <div class="auto-queries">
-        <div class="auto-queries-label">Auto queries</div>
-        <div class="query-list">${queryChips}</div>
-      </div>
+      <div class="profile-skills-cloud">${skillTags}</div>
+      <div class="profile-searches-label">Will search for:</div>
+      <div class="profile-searches">${fp.queries.map(q => `<span class="search-query-chip" onclick="document.getElementById('s-term').value=this.textContent">${esc(q)}</span>`).join('')}</div>
     </div>
   `;
 }
@@ -1872,7 +1840,7 @@ function renderResults(data) {
 
   // Platform legend (only show platforms that have results)
   const platforms = [...new Set(jobs.map(j => (j.source || '').toLowerCase().replace(/\s+/g, '_')))];
-  const platformNames = {linkedin:'LinkedIn', indeed:'Indeed', google:'Google', glassdoor:'Glassdoor', zip_recruiter:'ZipRecruiter', gupy:'Gupy', vagas:'Vagas.com.br'};
+  const platformNames = {linkedin:'LinkedIn', indeed:'Indeed', google:'Google', gupy:'Gupy', vagas:'Vagas.com.br'};
   if (platforms.length > 1) {
     html += '<div class="platform-legend">';
     for (const p of platforms) {
@@ -1900,11 +1868,12 @@ function renderResults(data) {
         ${j.easy_apply ? '<span class="easy-apply-badge">easy apply</span>' : ''}
       </div>`;
 
-    // Tags — max 5 total
+    // Tags — max 5 total, deduplicate techs that already appear in skills
     const bd = j.breakdown || {};
     const tags = [];
-    if (bd.skills) bd.skills.slice(0,2).forEach(s => tags.push(`<span class="match-tag skill">${esc(s)}</span>`));
-    if (bd.techs) bd.techs.slice(0,2).forEach(t => tags.push(`<span class="match-tag tech">${esc(t)}</span>`));
+    const seen = new Set();
+    if (bd.skills) bd.skills.slice(0,3).forEach(s => { seen.add(s.toLowerCase()); tags.push(`<span class="match-tag skill">${esc(s)}</span>`); });
+    if (bd.techs) bd.techs.filter(t => !seen.has(t.toLowerCase())).slice(0,2).forEach(t => tags.push(`<span class="match-tag tech">${esc(t)}</span>`));
     if (bd.seniority) tags.push(`<span class="match-tag">${esc(bd.seniority)}</span>`);
     if (tags.length) html += `<div class="match-tags">${tags.join('')}</div>`;
 
