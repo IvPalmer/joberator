@@ -1,4 +1,5 @@
 python-jobspy>=1.1.75
 mcp[cli]>=1.0.0
 requests
+beautifulsoup4>=4.12.0
 pycryptodome>=3.20.0

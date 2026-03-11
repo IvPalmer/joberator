@@ -39,11 +39,11 @@ DEFAULT_CONFIG = {
         "is_remote": True,
         "location": "",
         "results_wanted": 15,
-        "hours_old": 72,
+        "hours_old": 4320,
         "job_type": "",
         "min_salary": 0,
-        "sites": "linkedin,indeed,google",
-        "country": "USA",
+        "sites": "linkedin,indeed,google,gupy,vagas",
+        "country": "Brazil",
         "distance": 50,
     },
     "cron_jobs": [],  # [{id, name, search_params, schedule, enabled, last_run}]
@@ -119,9 +119,10 @@ def get_profile():
 
 
 def run_search(params):
-    """Run a job search using jobspy + scoring engine. Returns list of scored jobs."""
+    """Run a job search using jobspy + brazilian scrapers + scoring engine."""
     from jobspy import scrape_jobs
     from matching import build_profile_fingerprint, generate_search_queries, score_job
+    from brazil_scrapers import search_gupy, search_vagas
 
     profile = get_profile()
     if not profile:
@@ -138,20 +139,79 @@ def run_search(params):
     site_list = [s.strip() for s in params.get("sites", "linkedin,indeed,google").split(",") if s.strip()]
 
     is_remote = params.get("is_remote", False)
+    results_wanted = int(params.get("results_wanted", 15))
 
-    # Split sites: LinkedIn/ZipRecruiter handle is_remote natively.
-    # Indeed ignores is_remote when hours_old is set — needs "remote" in query.
-    # Google just appends "remote" to query text.
+    # Separate Brazilian scrapers from jobspy sites
+    brazil_sites = {"gupy", "vagas"}
+    jobspy_sites = {"linkedin", "zip_recruiter", "indeed", "google", "glassdoor"}
     native_remote_sites = {"linkedin", "zip_recruiter"}
     text_remote_sites = {"indeed", "google", "glassdoor"}
+
+    br_site_list = [s for s in site_list if s in brazil_sites]
+    js_site_list = [s for s in site_list if s in jobspy_sites]
+
+    # Portuguese equivalents for common English job titles (for BR platforms)
+    _title_pt = {
+        "analytics engineer": "engenheiro de dados",
+        "data analytics engineer": "engenheiro de dados",
+        "data engineer": "engenheiro de dados",
+        "data analyst": "analista de dados",
+        "data analytics": "analista de dados",
+        "business intelligence": "business intelligence",
+        "business intelligence analyst": "analista BI",
+        "software engineer": "engenheiro de software",
+        "full stack developer": "desenvolvedor full stack",
+        "frontend developer": "desenvolvedor frontend",
+        "backend developer": "desenvolvedor backend",
+        "web developer": "desenvolvedor web",
+        "web designer": "web designer",
+        "product manager": "gerente de produto",
+        "project manager": "gerente de projetos",
+        "devops engineer": "engenheiro devops",
+        "machine learning": "machine learning",
+        "qa engineer": "analista de qualidade",
+    }
+
+    def _get_br_queries(q):
+        """Get Portuguese query variants for Brazilian platforms."""
+        ql = q.lower().strip()
+        variants = [q]  # always include original
+        for en, pt in _title_pt.items():
+            if en in ql:
+                variants.append(pt)
+                break
+        return list(dict.fromkeys(variants))  # dedupe preserving order
 
     all_jobs = []
     queries_used = []
     for query in queries:
-        # Group 1: Sites with native remote filter (clean query)
-        native_sites = [s for s in site_list if s in native_remote_sites]
-        # Group 2: Sites needing "remote" in search text
-        text_sites = [s for s in site_list if s in text_remote_sites]
+        # --- Brazilian scrapers (use PT variants) ---
+        br_queries = _get_br_queries(query) if br_site_list else []
+        for br_site in br_site_list:
+            for br_q in br_queries:
+                try:
+                    if br_site == "gupy":
+                        br_jobs = search_gupy(br_q, results_wanted=results_wanted,
+                                              is_remote=is_remote, location=params.get("location", ""))
+                    elif br_site == "vagas":
+                        br_jobs = search_vagas(br_q, results_wanted=results_wanted,
+                                               is_remote=is_remote)
+                    else:
+                        continue
+
+                    if br_jobs:
+                        import pandas as pd
+                        all_jobs.append(pd.DataFrame(br_jobs))
+                        queries_used.append({"query": f"{br_q} ({br_site})", "count": len(br_jobs)})
+                except Exception as e:
+                    queries_used.append({"query": f"{br_q} ({br_site})", "count": 0, "error": str(e)})
+
+        # --- jobspy sites ---
+        if not js_site_list:
+            continue
+
+        native_sites = [s for s in js_site_list if s in native_remote_sites]
+        text_sites = [s for s in js_site_list if s in text_remote_sites]
 
         search_groups = []
         if native_sites:
@@ -162,19 +222,20 @@ def run_search(params):
         elif text_sites:
             search_groups.append((text_sites, query))
 
-        # If no remote split needed, just search all together
         if not is_remote:
-            search_groups = [(site_list, query)]
+            search_groups = [(js_site_list, query)]
 
         for sites_group, search_query in search_groups:
             kwargs = {
                 "site_name": sites_group,
                 "search_term": search_query,
-                "results_wanted": int(params.get("results_wanted", 15)),
-                "hours_old": int(params.get("hours_old", 72)),
+                "results_wanted": results_wanted,
                 "country_indeed": params.get("country", "USA"),
                 "linkedin_fetch_description": True,
             }
+            hours_old = int(params.get("hours_old", 4320))
+            if hours_old > 0:
+                kwargs["hours_old"] = hours_old
             if params.get("location"):
                 kwargs["location"] = params["location"]
             if is_remote:
@@ -223,11 +284,26 @@ def run_search(params):
         except (TypeError, ValueError):
             pass
 
+        # Determine apply URL and easy-apply status
+        direct_url = str(job.get("job_url_direct", "") or "")
+        if direct_url in ("", "nan", "None"):
+            direct_url = ""
+        job_url = str(job.get("job_url", ""))
+        is_easy_apply = not direct_url and "linkedin.com" in job_url
+        if is_easy_apply:
+            apply_url = job_url.split("?")[0].rstrip("/") + "/apply/"
+        elif direct_url:
+            apply_url = direct_url
+        else:
+            apply_url = job_url
+
         scored_jobs.append({
             "title": str(job.get("title", "")),
             "company": str(job.get("company", "")),
             "location": str(job.get("location", "")),
-            "url": str(job.get("job_url", "")),
+            "url": job_url,
+            "apply_url": apply_url,
+            "easy_apply": is_easy_apply,
             "salary": salary_str,
             "source": str(job.get("site", "")),
             "posted": str(job.get("date_posted", "")),
@@ -317,6 +393,13 @@ HTML = r"""<!DOCTYPE html>
     --radius: 10px;
     --radius-sm: 6px;
     --radius-lg: 14px;
+    --src-linkedin: #0a66c2;
+    --src-indeed: #ff5a1f;
+    --src-google: #34a853;
+    --src-glassdoor: #00a162;
+    --src-zip_recruiter: #5ba829;
+    --src-gupy: #f22d8a;
+    --src-vagas: #ff6600;
   }
 
   * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -389,40 +472,48 @@ HTML = r"""<!DOCTYPE html>
   /* --- SEARCH TAB --- */
   .search-layout {
     display: grid;
-    grid-template-columns: 320px 1fr;
+    grid-template-columns: 260px 1fr;
     min-height: calc(100vh - 52px);
   }
 
   .search-sidebar {
     border-right: 1px solid var(--border);
-    padding: 20px;
+    padding: 12px 14px;
     overflow-y: auto;
     max-height: calc(100vh - 52px);
     position: sticky;
     top: 52px;
+    display: flex;
+    flex-direction: column;
+    gap: 0;
   }
 
-  .search-sidebar h3 {
-    font-size: 12px;
-    font-weight: 600;
+  .sidebar-section {
+    padding: 10px 0;
+    border-bottom: 1px solid var(--border);
+  }
+  .sidebar-section:last-child { border-bottom: none; }
+
+  .sidebar-section-title {
+    font-size: 10px;
+    font-weight: 700;
     text-transform: uppercase;
-    letter-spacing: 0.6px;
-    color: var(--text-dim);
-    margin-bottom: 12px;
-    margin-top: 20px;
+    letter-spacing: 0.8px;
+    color: var(--text-faint);
+    margin-bottom: 8px;
   }
 
-  .search-sidebar h3:first-child { margin-top: 0; }
+  .search-sidebar h3 { display: none; }
 
   .form-group {
-    margin-bottom: 12px;
+    margin-bottom: 8px;
   }
 
   .form-group label {
     display: block;
-    font-size: 12px;
+    font-size: 11px;
     color: var(--text-dim);
-    margin-bottom: 4px;
+    margin-bottom: 3px;
     font-weight: 500;
   }
 
@@ -430,12 +521,12 @@ HTML = r"""<!DOCTYPE html>
   .form-group input[type="number"],
   .form-group select {
     width: 100%;
-    padding: 8px 10px;
+    padding: 6px 8px;
     background: var(--surface);
     border: 1px solid var(--border);
     border-radius: var(--radius-sm);
     color: var(--text);
-    font-size: 13px;
+    font-size: 12px;
     font-family: inherit;
     outline: none;
     transition: border-color 0.15s;
@@ -448,15 +539,21 @@ HTML = r"""<!DOCTYPE html>
 
   .form-group input::placeholder { color: var(--text-faint); }
 
+  .form-row {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 6px;
+  }
+
   .toggle-row {
     display: flex;
     align-items: center;
     justify-content: space-between;
-    padding: 6px 0;
+    padding: 4px 0;
   }
 
   .toggle-row span {
-    font-size: 13px;
+    font-size: 12px;
     color: var(--text);
   }
 
@@ -504,26 +601,31 @@ HTML = r"""<!DOCTYPE html>
   .site-chips {
     display: flex;
     flex-wrap: wrap;
-    gap: 6px;
+    gap: 4px;
   }
 
   .site-chip {
-    padding: 4px 10px;
-    font-size: 12px;
-    border-radius: 20px;
+    padding: 3px 8px;
+    font-size: 11px;
+    border-radius: 4px;
     border: 1px solid var(--border);
     background: var(--surface);
-    color: var(--text-dim);
+    color: var(--text-faint);
     cursor: pointer;
     transition: all 0.15s;
     user-select: none;
   }
 
-  .site-chip.active {
-    border-color: var(--accent);
-    background: var(--accent-glow);
-    color: var(--text);
-  }
+  .site-chip:hover { border-color: var(--border-hover); }
+
+  .site-chip.active { color: white; border-color: transparent; }
+  .site-chip.active[data-site="linkedin"] { background: var(--src-linkedin); }
+  .site-chip.active[data-site="indeed"] { background: var(--src-indeed); }
+  .site-chip.active[data-site="google"] { background: var(--src-google); }
+  .site-chip.active[data-site="glassdoor"] { background: var(--src-glassdoor); }
+  .site-chip.active[data-site="zip_recruiter"] { background: var(--src-zip_recruiter); }
+  .site-chip.active[data-site="gupy"] { background: var(--src-gupy); }
+  .site-chip.active[data-site="vagas"] { background: var(--src-vagas); }
 
   .btn {
     padding: 9px 16px;
@@ -540,7 +642,8 @@ HTML = r"""<!DOCTYPE html>
     background: var(--accent);
     color: white;
     width: 100%;
-    margin-top: 16px;
+    margin-top: 10px;
+    padding: 8px 14px;
   }
 
   .btn-primary:hover { background: var(--accent-dim); }
@@ -579,39 +682,62 @@ HTML = r"""<!DOCTYPE html>
 
   /* --- SEARCH RESULTS --- */
   .results-area {
-    padding: 20px 24px;
+    padding: 14px 18px;
     overflow-y: auto;
     max-height: calc(100vh - 52px);
   }
 
   .results-header {
     display: flex;
-    align-items: center;
+    align-items: baseline;
     justify-content: space-between;
-    margin-bottom: 16px;
+    margin-bottom: 10px;
+    gap: 8px;
   }
 
   .results-header h2 {
-    font-size: 16px;
+    font-size: 14px;
     font-weight: 600;
   }
 
   .results-meta {
-    font-size: 12px;
+    font-size: 11px;
     color: var(--text-dim);
   }
 
+  .platform-legend {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+    margin-bottom: 10px;
+  }
+
+  .platform-legend-item {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 10px;
+    color: var(--text-dim);
+  }
+
+  .platform-legend-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 2px;
+  }
+
+
   .queries-bar {
     display: flex;
-    gap: 6px;
+    gap: 4px;
     flex-wrap: wrap;
-    margin-bottom: 16px;
+    margin-bottom: 10px;
   }
 
   .query-chip {
-    font-size: 11px;
-    padding: 3px 10px;
-    border-radius: 20px;
+    font-size: 10px;
+    padding: 2px 8px;
+    border-radius: 12px;
     background: var(--surface);
     border: 1px solid var(--border);
     color: var(--text-dim);
@@ -622,82 +748,106 @@ HTML = r"""<!DOCTYPE html>
     font-weight: 600;
   }
 
+  .results-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+    gap: 6px;
+  }
+
   .job-card-result {
     background: var(--surface);
     border: 1px solid var(--border);
-    border-radius: var(--radius);
-    padding: 16px 18px;
-    margin-bottom: 8px;
-    transition: border-color 0.15s;
+    border-radius: var(--radius-sm);
+    border-left: 3px solid var(--border);
+    padding: 10px 12px 8px;
+    transition: border-color 0.15s, background 0.15s;
     cursor: pointer;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
   }
 
-  .job-card-result:hover { border-color: var(--border-hover); }
+  .job-card-result:hover { background: var(--surface2); border-color: var(--border-hover); }
+
+  /* Platform color-coded left border */
+  .job-card-result[data-source="linkedin"] { border-left-color: var(--src-linkedin); }
+  .job-card-result[data-source="indeed"] { border-left-color: var(--src-indeed); }
+  .job-card-result[data-source="google"] { border-left-color: var(--src-google); }
+  .job-card-result[data-source="glassdoor"] { border-left-color: var(--src-glassdoor); }
+  .job-card-result[data-source="zip_recruiter"] { border-left-color: var(--src-zip_recruiter); }
+  .job-card-result[data-source="gupy"] { border-left-color: var(--src-gupy); }
+  .job-card-result[data-source="vagas"] { border-left-color: var(--src-vagas); }
 
   .job-card-result .top-row {
     display: flex;
-    align-items: flex-start;
+    align-items: center;
     justify-content: space-between;
-    gap: 12px;
+    gap: 6px;
   }
 
   .job-card-result .title {
-    font-size: 14px;
+    font-size: 12.5px;
     font-weight: 600;
-    line-height: 1.3;
+    line-height: 1.25;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    flex: 1;
+    min-width: 0;
   }
 
-  .job-card-result .company-row {
-    font-size: 13px;
-    color: var(--text-dim);
-    margin-top: 3px;
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    flex-wrap: wrap;
-  }
-
-  .score-badge {
-    display: inline-flex;
-    align-items: center;
-    gap: 5px;
-    padding: 3px 10px;
-    border-radius: 20px;
+  .score-pct {
     font-size: 12px;
     font-weight: 700;
-    white-space: nowrap;
     flex-shrink: 0;
+    padding: 0 2px;
   }
+  .score-pct.high { color: var(--green); }
+  .score-pct.mid { color: var(--yellow); }
+  .score-pct.low { color: var(--text-faint); }
 
-  .score-high { background: var(--green-dim); color: var(--green); }
-  .score-mid { background: var(--yellow-dim); color: var(--yellow); }
-  .score-low { background: var(--surface2); color: var(--text-dim); }
-
-  .score-bar {
-    width: 48px;
-    height: 4px;
-    background: var(--border);
-    border-radius: 2px;
+  .job-card-result .subtitle {
+    font-size: 11px;
+    color: var(--text-dim);
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    white-space: nowrap;
     overflow: hidden;
+    text-overflow: ellipsis;
   }
 
-  .score-bar-fill {
-    height: 100%;
+  .easy-apply-badge {
+    display: inline-block;
+    font-size: 8px;
+    font-weight: 700;
+    padding: 1px 4px;
     border-radius: 2px;
-    transition: width 0.3s;
+    background: #0a66c2;
+    color: white;
+    flex-shrink: 0;
+    letter-spacing: 0.3px;
+    text-transform: uppercase;
+  }
+
+  .source-dot {
+    width: 7px;
+    height: 7px;
+    border-radius: 2px;
+    flex-shrink: 0;
+    display: inline-block;
   }
 
   .match-tags {
     display: flex;
-    gap: 4px;
+    gap: 3px;
     flex-wrap: wrap;
-    margin-top: 8px;
   }
 
   .match-tag {
-    font-size: 11px;
-    padding: 2px 8px;
-    border-radius: 4px;
+    font-size: 9.5px;
+    padding: 1px 5px;
+    border-radius: 3px;
     background: var(--surface2);
     color: var(--text-dim);
   }
@@ -706,23 +856,31 @@ HTML = r"""<!DOCTYPE html>
   .match-tag.tech { background: var(--purple-dim); color: var(--purple); }
   .match-tag.domain { background: var(--green-dim); color: var(--green); }
 
-  .job-card-result .meta-row {
+  .job-card-result .card-footer {
     display: flex;
     align-items: center;
-    gap: 10px;
-    margin-top: 8px;
-    font-size: 12px;
-    color: var(--text-faint);
-  }
-
-  .meta-row .salary { color: var(--green); font-weight: 500; }
-
-  .job-card-result .actions-row {
-    display: flex;
     gap: 6px;
-    margin-top: 10px;
-    align-items: center;
+    font-size: 10px;
+    color: var(--text-faint);
+    margin-top: auto;
   }
+
+  .card-footer .salary { color: var(--green); font-weight: 500; }
+
+  .card-footer .actions {
+    margin-left: auto;
+    display: flex;
+    gap: 3px;
+  }
+
+  .card-footer .actions .btn {
+    font-size: 10px;
+    padding: 2px 7px;
+    border-radius: 4px;
+  }
+
+  /* Hide score bar in grid — just show percentage */
+  .score-badge, .score-bar { display: none; }
 
   .spinner {
     display: inline-block;
@@ -766,30 +924,56 @@ HTML = r"""<!DOCTYPE html>
   .profile-card {
     background: var(--surface);
     border: 1px solid var(--border);
-    border-radius: var(--radius);
-    padding: 12px 14px;
-    margin-bottom: 16px;
+    border-radius: var(--radius-sm);
+    padding: 10px 12px;
+    margin-bottom: 0;
   }
 
-  .profile-card .profile-name {
-    font-size: 13px;
+  .profile-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    cursor: pointer;
+  }
+
+  .profile-header .profile-name {
+    font-size: 12px;
     font-weight: 600;
-    margin-bottom: 2px;
+  }
+
+  .profile-header .profile-brief {
+    font-size: 10px;
+    color: var(--text-dim);
+  }
+
+  .profile-toggle-icon {
+    font-size: 10px;
+    color: var(--text-faint);
+    transition: transform 0.2s;
+  }
+
+  .profile-card.collapsed .profile-details { display: none; }
+  .profile-card.collapsed .profile-toggle-icon { transform: rotate(-90deg); }
+
+  .profile-details {
+    margin-top: 8px;
+    padding-top: 8px;
+    border-top: 1px solid var(--border);
   }
 
   .profile-card .profile-headline {
-    font-size: 11px;
+    font-size: 10px;
     color: var(--text-dim);
-    margin-bottom: 8px;
+    margin-bottom: 6px;
     line-height: 1.3;
   }
 
   .profile-card .profile-stats {
     display: flex;
-    gap: 10px;
-    font-size: 11px;
+    gap: 8px;
+    font-size: 10px;
     color: var(--text-faint);
-    margin-bottom: 8px;
+    margin-bottom: 6px;
   }
 
   .profile-card .profile-stats span {
@@ -797,45 +981,60 @@ HTML = r"""<!DOCTYPE html>
     font-weight: 600;
   }
 
+  .profile-skills-cloud {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 3px;
+    margin-bottom: 6px;
+  }
+
+  .profile-skills-cloud .skill-tag {
+    font-size: 10px;
+    padding: 1px 6px;
+    border-radius: 3px;
+    background: var(--accent-glow);
+    color: var(--accent);
+  }
+
   .profile-card .auto-queries {
-    margin-top: 8px;
-    padding-top: 8px;
+    margin-top: 6px;
+    padding-top: 6px;
     border-top: 1px solid var(--border);
   }
 
   .profile-card .auto-queries-label {
-    font-size: 10px;
+    font-size: 9px;
     text-transform: uppercase;
     letter-spacing: 0.5px;
     color: var(--text-faint);
-    margin-bottom: 6px;
+    margin-bottom: 4px;
   }
 
   .profile-card .auto-queries .query-list {
     display: flex;
     flex-wrap: wrap;
-    gap: 4px;
+    gap: 3px;
   }
 
   .profile-card .auto-queries .aq-chip {
-    font-size: 11px;
-    padding: 2px 8px;
-    border-radius: 4px;
-    background: var(--accent-glow);
-    color: var(--accent);
+    font-size: 10px;
+    padding: 1px 6px;
+    border-radius: 3px;
+    background: var(--surface2);
+    color: var(--text-dim);
   }
 
   .profile-card .no-profile {
-    font-size: 12px;
+    font-size: 11px;
     color: var(--text-faint);
   }
 
   .hint {
-    font-size: 10px;
+    font-size: 9px;
     color: var(--text-faint);
     margin-top: 2px;
     display: block;
-    line-height: 1.3;
+    line-height: 1.2;
   }
 
   /* --- BOARD TAB --- */
@@ -1147,92 +1346,101 @@ HTML = r"""<!DOCTYPE html>
 <div class="tab-content active" id="tab-search">
   <div class="search-layout">
     <div class="search-sidebar">
-      <!-- Profile card -->
-      <div class="profile-card" id="search-profile-card">
-        <div class="no-profile">Loading profile...</div>
+      <!-- Profile card (collapsible) -->
+      <div class="sidebar-section" style="padding-top:0">
+        <div class="profile-card" id="search-profile-card">
+          <div class="no-profile">Loading profile...</div>
+        </div>
       </div>
 
-      <h3>Search</h3>
-      <div class="form-group">
-        <label>Role / Keywords</label>
-        <input type="text" id="s-term" placeholder="Auto-generated from profile">
-        <span class="hint" id="s-term-hint">Leave empty to search all your profile-matched roles automatically</span>
+      <!-- Search -->
+      <div class="sidebar-section">
+        <div class="sidebar-section-title">Search</div>
+        <div class="form-group">
+          <input type="text" id="s-term" placeholder="Role / Keywords (auto from profile)">
+        </div>
+        <div class="toggle-row">
+          <span>Remote only</span>
+          <label class="toggle">
+            <input type="checkbox" id="s-remote">
+            <span class="toggle-slider"></span>
+          </label>
+        </div>
+        <div class="form-group" id="location-group">
+          <input type="text" id="s-location" placeholder="Location (leave empty = global)">
+        </div>
+        <div class="form-row">
+          <div class="form-group">
+            <label>Region</label>
+            <select id="s-country">
+              <option value="worldwide">Worldwide</option>
+              <option value="USA">USA</option>
+              <option value="UK">UK</option>
+              <option value="Canada">Canada</option>
+              <option value="Australia">Australia</option>
+              <option value="Brazil" selected>Brazil</option>
+              <option value="Germany">Germany</option>
+              <option value="France">France</option>
+              <option value="India">India</option>
+              <option value="Netherlands">Netherlands</option>
+              <option value="Spain">Spain</option>
+              <option value="Italy">Italy</option>
+              <option value="Mexico">Mexico</option>
+              <option value="Argentina">Argentina</option>
+              <option value="Japan">Japan</option>
+              <option value="Singapore">Singapore</option>
+              <option value="Ireland">Ireland</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label>Posted within</label>
+            <select id="s-hours">
+              <option value="24">24 hours</option>
+              <option value="72">3 days</option>
+              <option value="168">1 week</option>
+              <option value="336">2 weeks</option>
+              <option value="720">1 month</option>
+              <option value="2160">3 months</option>
+              <option value="4320" selected>6 months</option>
+              <option value="8760">1 year</option>
+              <option value="0">All time</option>
+            </select>
+          </div>
+        </div>
+        <div class="form-row">
+          <div class="form-group">
+            <label>Job type</label>
+            <select id="s-jobtype">
+              <option value="">Any</option>
+              <option value="fulltime">Full-time</option>
+              <option value="parttime">Part-time</option>
+              <option value="contract">Contract</option>
+              <option value="internship">Internship</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label>Results/query</label>
+            <input type="number" id="s-results" value="15" min="5" max="50">
+          </div>
+        </div>
+        <div class="form-group">
+          <label>Min salary (USD/yr)</label>
+          <input type="number" id="s-salary" placeholder="0" step="10000">
+        </div>
       </div>
 
-      <div class="toggle-row">
-        <span>Remote only</span>
-        <label class="toggle">
-          <input type="checkbox" id="s-remote">
-          <span class="toggle-slider"></span>
-        </label>
-      </div>
-
-      <div class="form-group" id="location-group">
-        <label>Location</label>
-        <input type="text" id="s-location" placeholder="Worldwide (leave empty)">
-        <span class="hint">Optional. Leave empty to search globally.</span>
-      </div>
-
-      <h3>Filters</h3>
-      <div class="form-group">
-        <label>Job type</label>
-        <select id="s-jobtype">
-          <option value="">Any</option>
-          <option value="fulltime">Full-time</option>
-          <option value="parttime">Part-time</option>
-          <option value="contract">Contract</option>
-          <option value="internship">Internship</option>
-        </select>
-      </div>
-      <div class="form-group">
-        <label>Min salary (USD/yr)</label>
-        <input type="number" id="s-salary" placeholder="0" step="10000">
-      </div>
-      <div class="form-group">
-        <label>Posted within</label>
-        <select id="s-hours">
-          <option value="24">Last 24 hours</option>
-          <option value="72" selected>Last 3 days</option>
-          <option value="168">Last week</option>
-          <option value="336">Last 2 weeks</option>
-          <option value="720">Last month</option>
-        </select>
-      </div>
-      <div class="form-group">
-        <label>Results per query</label>
-        <input type="number" id="s-results" value="15" min="5" max="50">
-      </div>
-      <div class="form-group" id="country-group">
-        <label>Search region</label>
-        <select id="s-country">
-          <option value="worldwide" selected>Worldwide</option>
-          <option value="USA">USA</option>
-          <option value="UK">UK</option>
-          <option value="Canada">Canada</option>
-          <option value="Australia">Australia</option>
-          <option value="Brazil">Brazil</option>
-          <option value="Germany">Germany</option>
-          <option value="France">France</option>
-          <option value="India">India</option>
-          <option value="Netherlands">Netherlands</option>
-          <option value="Spain">Spain</option>
-          <option value="Italy">Italy</option>
-          <option value="Mexico">Mexico</option>
-          <option value="Argentina">Argentina</option>
-          <option value="Japan">Japan</option>
-          <option value="Singapore">Singapore</option>
-          <option value="Ireland">Ireland</option>
-        </select>
-        <span class="hint">LinkedIn &amp; Google always search globally. This sets the Indeed/Glassdoor domain. "Worldwide" uses LinkedIn + Google only.</span>
-      </div>
-
-      <h3>Job boards</h3>
-      <div class="site-chips" id="site-chips">
-        <span class="site-chip active" data-site="linkedin">LinkedIn</span>
-        <span class="site-chip active" data-site="indeed">Indeed</span>
-        <span class="site-chip active" data-site="google">Google</span>
-        <span class="site-chip" data-site="glassdoor">Glassdoor</span>
-        <span class="site-chip" data-site="zip_recruiter">ZipRecruiter</span>
+      <!-- Job boards -->
+      <div class="sidebar-section">
+        <div class="sidebar-section-title">Platforms</div>
+        <div class="site-chips" id="site-chips">
+          <span class="site-chip active" data-site="linkedin">LinkedIn</span>
+          <span class="site-chip active" data-site="indeed">Indeed</span>
+          <span class="site-chip active" data-site="google">Google</span>
+          <span class="site-chip" data-site="glassdoor">Glassdoor</span>
+          <span class="site-chip" data-site="zip_recruiter">ZipRecruiter</span>
+          <span class="site-chip active" data-site="gupy">Gupy</span>
+          <span class="site-chip active" data-site="vagas">Vagas.com.br</span>
+        </div>
       </div>
 
       <button class="btn btn-primary" id="search-btn" onclick="runSearch()">
@@ -1286,8 +1494,18 @@ HTML = r"""<!DOCTYPE html>
           <input type="number" id="cfg-results" value="15">
         </div>
         <div class="form-group">
-          <label>Posted within (hours)</label>
-          <input type="number" id="cfg-hours" value="72">
+          <label>Posted within</label>
+          <select id="cfg-hours">
+            <option value="24">Last 24 hours</option>
+            <option value="72">Last 3 days</option>
+            <option value="168">Last week</option>
+            <option value="336">Last 2 weeks</option>
+            <option value="720">Last month</option>
+            <option value="2160">Last 3 months</option>
+            <option value="4320" selected>Last 6 months</option>
+            <option value="8760">Last year</option>
+            <option value="0">All time</option>
+          </select>
         </div>
         <div class="form-group">
           <label>Min salary (USD)</label>
@@ -1443,7 +1661,7 @@ function applyDefaults() {
   $('s-location').value = d.location || '';
   $('s-remote').checked = !!d.is_remote;
   $('s-salary').value = d.min_salary || '';
-  $('s-hours').value = d.hours_old || 72;
+  $('s-hours').value = d.hours_old || 4320;
   $('s-results').value = d.results_wanted || 15;
   $('s-country').value = d.country || 'worldwide';
 
@@ -1460,7 +1678,7 @@ async function saveDefaults() {
     location: $('cfg-location').value,
     country: $('cfg-country').value,
     results_wanted: parseInt($('cfg-results').value) || 15,
-    hours_old: parseInt($('cfg-hours').value) || 72,
+    hours_old: parseInt($('cfg-hours').value) || 4320,
     min_salary: parseInt($('cfg-salary').value) || 0,
     sites: $('cfg-sites').value,
     is_remote: $('cfg-remote').checked,
@@ -1514,23 +1732,25 @@ function renderProfileCard() {
   }
 
   const fp = fingerprint;
-  const skillChips = fp.skills.slice(0,8).map(s => `<span class="aq-chip" style="background:var(--blue-dim);color:var(--blue)">${esc(s)}</span>`).join('');
-  const techChips = fp.techs.slice(0,6).map(t => `<span class="aq-chip" style="background:var(--purple-dim);color:var(--purple)">${esc(t)}</span>`).join('');
+  const skillTags = fp.skills.slice(0,6).map(s => `<span class="skill-tag">${esc(s)}</span>`).join('');
+  const techTags = fp.techs.slice(0,4).map(t => `<span class="skill-tag" style="background:var(--purple-dim);color:var(--purple)">${esc(t)}</span>`).join('');
   const queryChips = fp.queries.map(q => `<span class="aq-chip">${esc(q)}</span>`).join('');
 
   card.innerHTML = `
-    <div class="profile-name">${esc(fp.name)}</div>
-    <div class="profile-headline">${esc(fp.headline)}</div>
-    <div class="profile-stats">
-      <div><span>${fp.years_exp}</span>y exp</div>
-      <div><span>${fp.skills.length}</span> skills</div>
-      <div><span>${fp.techs.length}</span> techs</div>
-      ${fp.seniority.length ? '<div>Level: <span>' + esc(fp.seniority.join(', ')) + '</span></div>' : ''}
+    <div class="profile-header" onclick="this.parentElement.classList.toggle('collapsed')">
+      <div>
+        <div class="profile-name">${esc(fp.name)}</div>
+        <div class="profile-brief">${fp.years_exp}y &middot; ${fp.skills.length} skills &middot; ${fp.seniority.length ? esc(fp.seniority[0]) : ''}</div>
+      </div>
+      <span class="profile-toggle-icon">&#9660;</span>
     </div>
-    <div style="display:flex;flex-wrap:wrap;gap:3px;margin-bottom:6px">${skillChips}${techChips}</div>
-    <div class="auto-queries">
-      <div class="auto-queries-label">Auto search queries (when role is empty)</div>
-      <div class="query-list">${queryChips}</div>
+    <div class="profile-details">
+      <div class="profile-headline">${esc(fp.headline)}</div>
+      <div class="profile-skills-cloud">${skillTags}${techTags}</div>
+      <div class="auto-queries">
+        <div class="auto-queries-label">Auto queries</div>
+        <div class="query-list">${queryChips}</div>
+      </div>
     </div>
   `;
 }
@@ -1548,12 +1768,12 @@ function getSearchParams() {
   // When "Worldwide", only use globally-capable boards (LinkedIn, Google)
   let sites;
   if (region === 'worldwide') {
-    const globalSites = ['linkedin', 'google'];
+    const globalSites = ['linkedin', 'google', 'gupy'];
     sites = [...document.querySelectorAll('.site-chip.active')]
       .map(c => c.dataset.site)
       .filter(s => globalSites.includes(s))
       .join(',');
-    if (!sites) sites = 'linkedin,google';
+    if (!sites) sites = 'linkedin,google,gupy';
   } else {
     sites = [...document.querySelectorAll('.site-chip.active')].map(c => c.dataset.site).join(',');
   }
@@ -1564,7 +1784,7 @@ function getSearchParams() {
     is_remote: $('s-remote').checked,
     job_type: $('s-jobtype').value,
     min_salary: parseInt($('s-salary').value) || 0,
-    hours_old: parseInt($('s-hours').value) || 72,
+    hours_old: parseInt($('s-hours').value) || 4320,
     results_wanted: parseInt($('s-results').value) || 15,
     country: region === 'worldwide' ? 'USA' : region,
     sites: sites || 'linkedin',
@@ -1635,8 +1855,10 @@ function renderResults(data) {
 
   // Header
   html += `<div class="results-header">
-    <h2>${data.total} jobs found</h2>
-    <span class="results-meta">${data.profile ? data.profile.name + ' &middot; ' : ''}${data.profile ? data.profile.skills + ' skills, ' + data.profile.techs + ' techs, ' + data.profile.years + 'y exp' : ''}</span>
+    <div>
+      <h2>${data.total} jobs found</h2>
+      <span class="results-meta">${data.profile ? data.profile.name + ' &middot; ' : ''}${data.profile ? data.profile.skills + ' skills, ' + data.profile.techs + ' techs, ' + data.profile.years + 'y exp' : ''}</span>
+    </div>
   </div>`;
 
   // Queries
@@ -1648,55 +1870,59 @@ function renderResults(data) {
     html += '</div>';
   }
 
-  // Jobs
+  // Platform legend (only show platforms that have results)
+  const platforms = [...new Set(jobs.map(j => (j.source || '').toLowerCase().replace(/\s+/g, '_')))];
+  const platformNames = {linkedin:'LinkedIn', indeed:'Indeed', google:'Google', glassdoor:'Glassdoor', zip_recruiter:'ZipRecruiter', gupy:'Gupy', vagas:'Vagas.com.br'};
+  if (platforms.length > 1) {
+    html += '<div class="platform-legend">';
+    for (const p of platforms) {
+      html += `<span class="platform-legend-item"><span class="platform-legend-dot" style="background:var(--src-${p})"></span>${platformNames[p] || p}</span>`;
+    }
+    html += '</div>';
+  }
+
+  // Jobs grid
+  html += '<div class="results-grid">';
   for (let i = 0; i < jobs.length; i++) {
     const j = jobs[i];
-    const scoreClass = j.score >= 60 ? 'score-high' : j.score >= 35 ? 'score-mid' : 'score-low';
-    const barColor = j.score >= 60 ? 'var(--green)' : j.score >= 35 ? 'var(--yellow)' : 'var(--text-faint)';
+    const sClass = j.score >= 60 ? 'high' : j.score >= 35 ? 'mid' : 'low';
     const isSaved = savedUrls.has(j.url);
+    const src = (j.source || '').toLowerCase().replace(/\s+/g, '_');
 
-    html += `<div class="job-card-result" onclick="showResultDetail(${i})">
+    html += `<div class="job-card-result" data-source="${esc(src)}" onclick="showResultDetail(${i})">
       <div class="top-row">
-        <div>
-          <div class="title">${esc(j.title)}</div>
-          <div class="company-row">
-            ${esc(j.company)}
-            ${j.location ? ' &middot; ' + esc(j.location) : ''}
-          </div>
-        </div>
-        <span class="score-badge ${scoreClass}">
-          ${j.score}%
-          <span class="score-bar"><span class="score-bar-fill" style="width:${j.score}%;background:${barColor}"></span></span>
-        </span>
+        <div class="title" title="${esc(j.title)}">${esc(j.title)}</div>
+        <span class="score-pct ${sClass}">${j.score}%</span>
+      </div>
+      <div class="subtitle">
+        <span class="source-dot" style="background:var(--src-${src})"></span>
+        ${esc(j.company)}${j.location ? ' &middot; ' + esc(j.location) : ''}
+        ${j.easy_apply ? '<span class="easy-apply-badge">easy apply</span>' : ''}
       </div>`;
 
-    // Match tags
+    // Tags — max 5 total
     const bd = j.breakdown || {};
     const tags = [];
-    if (bd.skills) bd.skills.slice(0,4).forEach(s => tags.push(`<span class="match-tag skill">${esc(s)}</span>`));
-    if (bd.techs) bd.techs.slice(0,4).forEach(t => tags.push(`<span class="match-tag tech">${esc(t)}</span>`));
-    if (bd.domains) bd.domains.slice(0,2).forEach(d => tags.push(`<span class="match-tag domain">${esc(d)}</span>`));
+    if (bd.skills) bd.skills.slice(0,2).forEach(s => tags.push(`<span class="match-tag skill">${esc(s)}</span>`));
+    if (bd.techs) bd.techs.slice(0,2).forEach(t => tags.push(`<span class="match-tag tech">${esc(t)}</span>`));
     if (bd.seniority) tags.push(`<span class="match-tag">${esc(bd.seniority)}</span>`);
     if (tags.length) html += `<div class="match-tags">${tags.join('')}</div>`;
 
-    // Meta
-    html += `<div class="meta-row">`;
-    if (j.salary) html += `<span class="salary">${esc(j.salary)}</span>`;
-    if (j.source) html += `<span>${esc(j.source)}</span>`;
+    // Footer: date + salary + actions
+    html += `<div class="card-footer">`;
     if (j.posted && j.posted !== 'nan') html += `<span>${esc(j.posted)}</span>`;
-    html += `</div>`;
-
-    // Actions
-    html += `<div class="actions-row">
+    if (j.salary) html += `<span class="salary">${esc(j.salary)}</span>`;
+    html += `<span class="actions">
       <button class="btn btn-save btn-small ${isSaved ? 'saved' : ''}" onclick="event.stopPropagation();saveResult(${i}, this)" ${isSaved ? 'disabled' : ''}>
-        ${isSaved ? 'Saved' : 'Save to Board'}
+        ${isSaved ? '✓' : 'Save'}
       </button>
-      ${j.url ? `<a href="${esc(j.url)}" target="_blank" class="btn btn-ghost btn-small" onclick="event.stopPropagation()">View</a>` : ''}
-      ${j.url ? `<a href="${esc(getApplyUrl(j))}" target="_blank" class="btn btn-small" style="background:var(--accent);color:white" onclick="event.stopPropagation()">Apply</a>` : ''}
-    </div>`;
+      ${j.apply_url || j.url ? `<a href="${esc(j.apply_url || j.url)}" target="_blank" class="btn btn-small" style="background:var(--accent);color:white" onclick="event.stopPropagation()">Apply</a>` : ''}
+    </span>`;
+    html += `</div>`;
 
     html += '</div>';
   }
+  html += '</div>';
 
   area.innerHTML = html;
 }
@@ -1893,7 +2119,7 @@ function renderSettings() {
   $('cfg-location').value = d.location || '';
   $('cfg-country').value = d.country || 'worldwide';
   $('cfg-results').value = d.results_wanted || 15;
-  $('cfg-hours').value = d.hours_old || 72;
+  $('cfg-hours').value = d.hours_old || 4320;
   $('cfg-salary').value = d.min_salary || 0;
   $('cfg-sites').value = d.sites || 'linkedin,indeed,google';
   $('cfg-remote').checked = !!d.is_remote;
@@ -2057,7 +2283,7 @@ async function runCronNow(idx) {
   $('s-remote').checked = !!p.is_remote;
   $('s-jobtype').value = p.job_type || '';
   $('s-salary').value = p.min_salary || '';
-  $('s-hours').value = p.hours_old || 72;
+  $('s-hours').value = p.hours_old || 4320;
   if (p.sites) {
     document.querySelectorAll('.site-chip').forEach(chip => {
       chip.classList.toggle('active', p.sites.split(',').map(s=>s.trim()).includes(chip.dataset.site));
@@ -2077,13 +2303,9 @@ function esc(str) {
 }
 
 function getApplyUrl(job) {
-  // LinkedIn: add /apply to job URL. Indeed: use the URL directly.
-  const url = job.url || '';
-  if (url.includes('linkedin.com/jobs/view/')) {
-    return url.replace(/\/?$/, '/') + '?trk=apply';
-  }
-  return url;
+  return job.apply_url || job.url || '';
 }
+
 
 document.addEventListener('keydown', e => {
   if (e.key === 'Escape') {
