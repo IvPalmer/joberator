@@ -16,6 +16,7 @@ ENV PYTHONUNBUFFERED=1
 EXPOSE 5151
 
 # DB lives at $HOME/.joberator/jobs.db — mounted as volume by compose/Dokploy
-RUN mkdir -p /root/.joberator
+# Pre-create empty schema so kanban.py boots cleanly on a fresh deploy
+RUN mkdir -p /root/.joberator && python -c "import sqlite3; c=sqlite3.connect('/root/.joberator/jobs.db'); c.execute('''CREATE TABLE IF NOT EXISTS jobs (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT NOT NULL, company TEXT NOT NULL, location TEXT, url TEXT, salary TEXT, source TEXT, description TEXT, notes TEXT, status TEXT DEFAULT \"interested\", created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)'''); c.commit(); c.close()"
 
 CMD ["python", "scripts/kanban.py"]
