@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "joberator-jobs": {
+      "command": "/Users/palmer/Work/Dev/joberator/mcp/.venv/bin/python3",
+      "args": ["/Users/palmer/Work/Dev/joberator/mcp/job_search_server.py"]
+    }
+  }
+}
