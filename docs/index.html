@@ -258,6 +258,12 @@
   }
   footer a { color: var(--accent-deep); font-weight: 600; }
 
+  :is(a, button, summary):focus-visible {
+    outline: 3px solid var(--accent);
+    outline-offset: 2px;
+    border-radius: 4px;
+  }
+
   @media (prefers-reduced-motion: reduce) {
     * { transition: none !important; }
     html { scroll-behavior: auto; }
@@ -292,8 +298,8 @@
         <span class="en">Download your profile as PDF</span>
       </h2>
       <p>
-        <span class="pt">No LinkedIn, abra o <strong>seu perfil</strong>, clique em <span class="path">Mais</span> e depois em <span class="path">Salvar como PDF</span>. Funciona no computador e no app.</span>
-        <span class="en">On LinkedIn, open <strong>your profile</strong>, click <span class="path">More</span>, then <span class="path">Save to PDF</span>. Works on desktop and in the app.</span>
+        <span class="pt">No LinkedIn, abra o <strong>seu perfil</strong>, clique em <span class="path">Mais</span> e depois em <span class="path">Salvar como PDF</span>. No celular essa opção às vezes não aparece: se for o caso, use o computador.</span>
+        <span class="en">On LinkedIn, open <strong>your profile</strong>, click <span class="path">More</span>, then <span class="path">Save to PDF</span>. The option sometimes doesn't show on mobile: if so, use a computer.</span>
       </p>
       <p>
         <span class="pt">Não achou? Sem problema: copie e cole as seções do seu perfil como texto no passo 3.</span>
@@ -306,8 +312,8 @@
         <span class="en">Open your AI</span>
       </h2>
       <p>
-        <span class="pt"><a href="https://claude.ai" target="_blank" rel="noopener">claude.ai</a> (conta grátis serve) ou <a href="https://chatgpt.com" target="_blank" rel="noopener">ChatGPT</a>. O roteiro funciona nos dois.</span>
-        <span class="en"><a href="https://claude.ai" target="_blank" rel="noopener">claude.ai</a> (a free account works) or <a href="https://chatgpt.com" target="_blank" rel="noopener">ChatGPT</a>. The script works with both.</span>
+        <span class="pt"><a href="https://claude.ai" target="_blank" rel="noopener">claude.ai</a> (conta grátis serve na maioria dos casos) ou <a href="https://chatgpt.com" target="_blank" rel="noopener">ChatGPT</a>. Se o PDF não for aceito, cole o texto do perfil.</span>
+        <span class="en"><a href="https://claude.ai" target="_blank" rel="noopener">claude.ai</a> (a free account usually works) or <a href="https://chatgpt.com" target="_blank" rel="noopener">ChatGPT</a>. If the PDF isn't accepted, paste your profile as text.</span>
       </p>
     </li>
     <li>
@@ -321,10 +327,10 @@
       </p>
       <div class="prompt-zone">
         <p class="hint">
-          <span class="pt">O roteiro está em inglês, mas relaxa: a resposta vem em português.</span>
+          <span class="pt">O roteiro está em inglês, mas a resposta vem em português.</span>
           <span class="en">The script asks the AI to reply in your language.</span>
         </p>
-        <button type="button" class="copy-btn" id="copyBtn">
+        <button type="button" class="copy-btn" id="copyBtn" aria-live="polite">
           <span class="pt" data-idle="Copiar o roteiro" data-done="Copiado! Agora é só colar ✓">Copiar o roteiro</span>
           <span class="en" data-idle="Copy the script" data-done="Copied! Now paste it ✓">Copy the script</span>
         </button>
@@ -351,11 +357,13 @@ Evaluate each section against this rubric, in this order:
 
 5. PROJECTS & FEATURED - Recent, real, defensible. Public repos or demos should be linked. Junior-era artifacts that undercut my seniority should go. No self-deprecating copy. Dates must be accurate.
 
-6. OPEN TO WORK - If I'm job searching: is it enabled (a recruiter-only mode exists)? Are all job-title slots filled with titles that exist in LinkedIn's own taxonomy? Employment types, locations + remote, and start date set?
+6. OPEN TO WORK - If I'm job searching: is it enabled (a recruiter-only mode exists)? Are the job-title slots filled with aligned titles that exist in LinkedIn's own taxonomy (no unrelated titles just to fill space)? Employment types, locations + remote, and start date set?
 
 7. CONSISTENCY - My headline, titles, and dates should match my resume, personal site, and GitHub. Flag mismatches I should fix everywhere at once.
 
-8. BILINGUAL PROFILES (if relevant) - LinkedIn supports per-language profile versions: headline, About, and experience descriptions are per-language; skills, education, languages, and featured are shared. If I work in a non-English market but want international reach, recommend an English primary + local-language secondary, and review both.
+8. BILINGUAL PROFILES (if relevant) - LinkedIn supports per-language profile versions: key text fields (headline, About, experience descriptions) are per-language, while most structured sections are shared. If I work in a non-English market but want international reach, recommend an English primary + local-language secondary, and review both visible versions.
+
+If the provided PDF or text omits sections, list which sections are missing and ask me to paste them.
 
 ## Output format
 
@@ -387,7 +395,7 @@ Be direct, don't flatter. If a section is fine, say so in one line and move on.<
     </h2>
     <ul>
       <li>
-        <span class="pt"><strong>Diagnóstico por seção:</strong> headline, Sobre, experiências, competências, projetos, vaga aberta.</span>
+        <span class="pt"><strong>Diagnóstico por seção:</strong> headline, Sobre, experiências, competências, projetos, Open to Work.</span>
         <span class="en"><strong>Section-by-section diagnosis:</strong> headline, About, experience, skills, projects, Open to Work.</span>
       </li>
       <li>
@@ -402,8 +410,8 @@ Be direct, don't flatter. If a section is fine, say so in one line and move on.<
   </section>
 
   <p class="privacy">
-    <span class="pt"><strong>Privacidade:</strong> seu perfil vai direto pra sua conta de IA. Nada passa por este site e nada fica salvo aqui. Esta página é só o roteiro.</span>
-    <span class="en"><strong>Privacy:</strong> your profile goes straight to your own AI account. Nothing passes through this site and nothing is stored here. This page is just the script.</span>
+    <span class="pt"><strong>Privacidade:</strong> nada do seu perfil passa por este site nem fica salvo aqui; a página é só o roteiro. Seu arquivo é processado pela IA conforme os termos da sua própria conta.</span>
+    <span class="en"><strong>Privacy:</strong> none of your profile data passes through this site or is stored here; this page is just the script. Your file is processed by the AI under your own account's terms.</span>
   </p>
 </main>
 

@@ -27,9 +27,11 @@ Evaluate each section, in this order:
 3. **Experience** - Titles should match what recruiters type into title filters (filters only match the position-title field). Suggest aligned, defensible titles; adding scope in parentheses is fine, e.g. "Analyst (Data Engineering)". Warn against retitles a background check would contradict, especially on older roles. Employment type (full-time vs contract) must be accurate. Each role needs 2-4 bullets with real numbers; flag bullets without one and ask for the number rather than inventing it. Strip internal/confidential system or people names; keep the metrics.
 4. **Skills** - Only pin/feature skills the user could defend in a live interview. Lead with disciplines ("Data Engineering") over tools. The top 3 pinned matter most. 15-25 relevant skills beat 50 noisy ones. Flag stuffing.
 5. **Projects & Featured** - Recent, real, defensible. Link public repos or demos. Remove junior-era artifacts that undercut seniority. No self-deprecating copy. Dates accurate.
-6. **Open to Work** - If the user is searching: is it enabled (recruiter-only mode exists)? All title slots filled with titles that exist in LinkedIn's own taxonomy (the typeahead must match)? Employment types, locations + remote, and start date set?
+6. **Open to Work** - If the user is searching: is it enabled (recruiter-only mode exists)? Title slots filled with aligned titles that exist in LinkedIn's own taxonomy (the typeahead must match; no unrelated titles just to fill space)? Employment types, locations + remote, and start date set?
 7. **Consistency** - Headline, titles, and dates should match the user's resume, personal site, and GitHub. Flag mismatches to fix everywhere at once.
-8. **Bilingual profiles** (when relevant) - LinkedIn supports per-language profile versions: headline, About, and experience descriptions are per-language; skills, education, languages, and featured are shared. For non-English markets with international ambitions, recommend an English primary + local-language secondary, and review both.
+8. **Bilingual profiles** (when relevant) - LinkedIn supports per-language profile versions: key text fields (headline, About, experience descriptions) are per-language, while most structured sections are shared. For non-English markets with international ambitions, recommend an English primary + local-language secondary, and review both visible versions.
+
+If the provided PDF or text omits sections, list which sections are missing and ask the user to paste them.
 
 ## Output format
 
