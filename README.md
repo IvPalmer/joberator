@@ -87,6 +87,15 @@ Opens at `http://localhost:5151`.
 - Profile sync via Voyager API for skill extraction and matching
 - Easy Apply detection on LinkedIn jobs
 
+## LinkedIn Profile Review
+
+A field-tested review rubric for your LinkedIn profile, in two forms:
+
+- **Shareable page** (no install needed): [the review guide](https://ivpalmer.github.io/joberator/) walks anyone through exporting their profile as PDF and running the review on their own claude.ai or ChatGPT account. PT-BR and English.
+- **Claude skill**: `skills/profile-review/SKILL.md` — ask Claude to review your LinkedIn profile and it applies the same rubric (headline formula, About hook, recruiter title-filter alignment, defensible skills, Open to Work setup, cross-surface consistency).
+
+Your profile data only ever goes to your own AI account; the page is static.
+
 ## Claude Code Integration (Optional)
 
 If you use [Claude Code](https://claude.ai/claude-code), you can add the MCP server for natural language job searching:

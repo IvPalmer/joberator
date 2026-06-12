@@ -1,0 +1,471 @@
+<!DOCTYPE html>
+<html lang="pt-BR" data-lang="pt">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Revisão de LinkedIn com IA · Joberator</title>
+<meta name="description" content="Um roteiro de revisão profissional do seu perfil do LinkedIn, para rodar na sua própria conta de IA. Grátis, leva 10 minutos.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,600;9..144,700&family=Albert+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --paper: oklch(96.5% 0.012 85);
+    --paper-deep: oklch(93.5% 0.02 85);
+    --ink: oklch(25% 0.02 285);
+    --ink-dim: oklch(46% 0.025 285);
+    --accent: oklch(51% 0.23 277);
+    --accent-deep: oklch(42% 0.21 277);
+    --accent-soft: oklch(90% 0.045 277);
+    --ok: oklch(52% 0.13 155);
+    --radius: 14px;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body {
+    background: var(--paper);
+    color: var(--ink);
+    font-family: "Albert Sans", sans-serif;
+    font-size: clamp(1rem, 0.95rem + 0.3vw, 1.125rem);
+    line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+  }
+  /* language switching */
+  html[data-lang="pt"] .en { display: none !important; }
+  html[data-lang="en"] .pt { display: none !important; }
+
+  .wrap {
+    max-width: 680px;
+    margin: 0 auto;
+    padding: clamp(1.25rem, 4vw, 2.5rem);
+  }
+
+  header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding-bottom: clamp(2.5rem, 8vw, 4.5rem);
+  }
+  .wordmark {
+    font-family: "Fraunces", serif;
+    font-weight: 700;
+    font-size: 1.15rem;
+    letter-spacing: -0.01em;
+    color: var(--ink);
+    text-decoration: none;
+  }
+  .wordmark span { color: var(--accent); }
+  .lang-toggle {
+    display: flex;
+    gap: 0.25rem;
+    background: var(--paper-deep);
+    border-radius: 999px;
+    padding: 0.2rem;
+  }
+  .lang-toggle button {
+    font: inherit;
+    font-size: 0.8rem;
+    font-weight: 600;
+    border: none;
+    background: transparent;
+    color: var(--ink-dim);
+    padding: 0.25rem 0.7rem;
+    border-radius: 999px;
+    cursor: pointer;
+  }
+  .lang-toggle button[aria-pressed="true"] {
+    background: var(--ink);
+    color: var(--paper);
+  }
+
+  h1 {
+    font-family: "Fraunces", serif;
+    font-weight: 600;
+    font-size: clamp(2.3rem, 6.5vw, 3.4rem);
+    line-height: 1.08;
+    letter-spacing: -0.02em;
+    margin-bottom: 1.1rem;
+  }
+  h1 em {
+    font-style: italic;
+    color: var(--accent);
+  }
+  .lede {
+    color: var(--ink-dim);
+    font-size: clamp(1.05rem, 1rem + 0.4vw, 1.2rem);
+    max-width: 34em;
+  }
+  .lede strong { color: var(--ink); font-weight: 600; }
+
+  /* steps */
+  .steps {
+    list-style: none;
+    margin: clamp(3rem, 9vw, 5rem) 0 0;
+    counter-reset: step;
+  }
+  .steps li {
+    counter-increment: step;
+    position: relative;
+    padding: 0 0 clamp(2.2rem, 6vw, 3.2rem) clamp(3.4rem, 9vw, 4.6rem);
+  }
+  .steps li::before {
+    content: counter(step);
+    position: absolute;
+    left: 0;
+    top: -0.55em;
+    font-family: "Fraunces", serif;
+    font-weight: 700;
+    font-size: clamp(2.6rem, 7vw, 3.6rem);
+    line-height: 1;
+    color: var(--accent);
+    opacity: 0.85;
+  }
+  .steps li:not(:last-child)::after {
+    content: "";
+    position: absolute;
+    left: clamp(0.85rem, 2.4vw, 1.2rem);
+    top: clamp(2.6rem, 7.5vw, 3.7rem);
+    bottom: 0.6rem;
+    width: 2px;
+    background: var(--paper-deep);
+  }
+  .steps h2 {
+    font-family: "Fraunces", serif;
+    font-weight: 600;
+    font-size: clamp(1.3rem, 3.5vw, 1.6rem);
+    letter-spacing: -0.01em;
+    margin-bottom: 0.45rem;
+  }
+  .steps p { color: var(--ink-dim); max-width: 32em; }
+  .steps p + p { margin-top: 0.5rem; }
+  .path {
+    display: inline-block;
+    background: var(--paper-deep);
+    border-radius: 6px;
+    padding: 0.05rem 0.45rem;
+    font-weight: 600;
+    font-size: 0.92em;
+    color: var(--ink);
+    white-space: nowrap;
+  }
+  .steps a { color: var(--accent-deep); font-weight: 600; text-decoration-thickness: 1.5px; text-underline-offset: 2px; }
+
+  /* prompt block */
+  .prompt-zone {
+    background: var(--accent-soft);
+    border-radius: var(--radius);
+    padding: clamp(1.4rem, 4.5vw, 2.2rem);
+    margin-top: 0.4rem;
+  }
+  .prompt-zone .hint {
+    font-size: 0.95rem;
+    color: var(--accent-deep);
+    margin-bottom: 1.1rem;
+    max-width: 30em;
+  }
+  .copy-btn {
+    font: inherit;
+    font-weight: 700;
+    font-size: 1.05rem;
+    width: 100%;
+    border: none;
+    border-radius: 999px;
+    background: var(--accent);
+    color: oklch(98% 0.005 277);
+    padding: 0.95rem 1.6rem;
+    cursor: pointer;
+    transition: transform 0.15s cubic-bezier(0.22, 1, 0.36, 1), background 0.15s;
+  }
+  .copy-btn:hover { background: var(--accent-deep); }
+  .copy-btn:active { transform: scale(0.985); }
+  .copy-btn.done { background: var(--ok); }
+  details { margin-top: 1.1rem; }
+  summary {
+    cursor: pointer;
+    font-weight: 600;
+    font-size: 0.95rem;
+    color: var(--accent-deep);
+    list-style: none;
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+  }
+  summary::-webkit-details-marker { display: none; }
+  summary::before {
+    content: "";
+    width: 0.5em; height: 0.5em;
+    border-right: 2px solid currentColor;
+    border-bottom: 2px solid currentColor;
+    transform: rotate(-45deg);
+    transition: transform 0.2s ease-out;
+  }
+  details[open] summary::before { transform: rotate(45deg); }
+  pre {
+    margin-top: 0.9rem;
+    background: var(--paper);
+    border-radius: 10px;
+    padding: 1.1rem 1.2rem;
+    font-size: 0.8rem;
+    line-height: 1.55;
+    white-space: pre-wrap;
+    overflow-wrap: break-word;
+    color: var(--ink-dim);
+    max-height: 22rem;
+    overflow-y: auto;
+  }
+
+  /* result list */
+  .result {
+    margin: clamp(3rem, 9vw, 4.5rem) 0 0;
+  }
+  .result h2 {
+    font-family: "Fraunces", serif;
+    font-weight: 600;
+    font-size: clamp(1.4rem, 4vw, 1.8rem);
+    letter-spacing: -0.01em;
+    margin-bottom: 1rem;
+  }
+  .result ul { list-style: none; }
+  .result li {
+    padding: 0.45rem 0 0.45rem 1.7rem;
+    position: relative;
+    color: var(--ink-dim);
+  }
+  .result li::before {
+    content: "✓";
+    position: absolute;
+    left: 0;
+    color: var(--ok);
+    font-weight: 700;
+  }
+  .result li strong { color: var(--ink); font-weight: 600; }
+
+  .privacy {
+    margin-top: clamp(3rem, 9vw, 4.5rem);
+    border-top: 2px solid var(--paper-deep);
+    padding-top: 1.6rem;
+    font-size: 0.95rem;
+    color: var(--ink-dim);
+    max-width: 36em;
+  }
+  .privacy strong { color: var(--ink); }
+
+  footer {
+    margin-top: 2.5rem;
+    padding-bottom: 1rem;
+    font-size: 0.85rem;
+    color: var(--ink-dim);
+  }
+  footer a { color: var(--accent-deep); font-weight: 600; }
+
+  @media (prefers-reduced-motion: reduce) {
+    * { transition: none !important; }
+    html { scroll-behavior: auto; }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <a class="wordmark" href="https://github.com/IvPalmer/joberator">joberator<span>.</span></a>
+  <nav class="lang-toggle" aria-label="Idioma / Language">
+    <button type="button" data-setlang="pt" aria-pressed="true">PT</button>
+    <button type="button" data-setlang="en" aria-pressed="false">EN</button>
+  </nav>
+</header>
+
+<main>
+  <h1>
+    <span class="pt">Seu LinkedIn, revisado <em>a sério</em>.</span>
+    <span class="en">Your LinkedIn, reviewed <em>for real</em>.</span>
+  </h1>
+  <p class="lede">
+    <span class="pt">Um roteiro de revisão profissional pra você rodar na <strong>sua própria conta de IA</strong>. Diagnóstico por seção, os 5 ajustes de maior impacto e textos prontos pra colar. <strong>Grátis, uns 10 minutos.</strong></span>
+    <span class="en">A professional review script you run on <strong>your own AI account</strong>. Section-by-section diagnosis, the 5 highest-impact fixes, and ready-to-paste rewrites. <strong>Free, about 10 minutes.</strong></span>
+  </p>
+
+  <ol class="steps">
+    <li>
+      <h2>
+        <span class="pt">Baixe seu perfil em PDF</span>
+        <span class="en">Download your profile as PDF</span>
+      </h2>
+      <p>
+        <span class="pt">No LinkedIn, abra o <strong>seu perfil</strong>, clique em <span class="path">Mais</span> e depois em <span class="path">Salvar como PDF</span>. Funciona no computador e no app.</span>
+        <span class="en">On LinkedIn, open <strong>your profile</strong>, click <span class="path">More</span>, then <span class="path">Save to PDF</span>. Works on desktop and in the app.</span>
+      </p>
+      <p>
+        <span class="pt">Não achou? Sem problema: copie e cole as seções do seu perfil como texto no passo 3.</span>
+        <span class="en">Can't find it? No problem: copy and paste your profile sections as text in step 3.</span>
+      </p>
+    </li>
+    <li>
+      <h2>
+        <span class="pt">Abra a sua IA</span>
+        <span class="en">Open your AI</span>
+      </h2>
+      <p>
+        <span class="pt"><a href="https://claude.ai" target="_blank" rel="noopener">claude.ai</a> (conta grátis serve) ou <a href="https://chatgpt.com" target="_blank" rel="noopener">ChatGPT</a>. O roteiro funciona nos dois.</span>
+        <span class="en"><a href="https://claude.ai" target="_blank" rel="noopener">claude.ai</a> (a free account works) or <a href="https://chatgpt.com" target="_blank" rel="noopener">ChatGPT</a>. The script works with both.</span>
+      </p>
+    </li>
+    <li>
+      <h2>
+        <span class="pt">Copie o roteiro e cole lá</span>
+        <span class="en">Copy the script and paste it there</span>
+      </h2>
+      <p>
+        <span class="pt">Anexe o PDF na mesma mensagem (o clipe 📎) e envie.</span>
+        <span class="en">Attach the PDF to the same message (the 📎 clip) and send.</span>
+      </p>
+      <div class="prompt-zone">
+        <p class="hint">
+          <span class="pt">O roteiro está em inglês, mas relaxa: a resposta vem em português.</span>
+          <span class="en">The script asks the AI to reply in your language.</span>
+        </p>
+        <button type="button" class="copy-btn" id="copyBtn">
+          <span class="pt" data-idle="Copiar o roteiro" data-done="Copiado! Agora é só colar ✓">Copiar o roteiro</span>
+          <span class="en" data-idle="Copy the script" data-done="Copied! Now paste it ✓">Copy the script</span>
+        </button>
+        <details>
+          <summary>
+            <span class="pt">Ver o roteiro completo</span>
+            <span class="en">See the full script</span>
+          </summary>
+          <pre id="promptText">You are a senior career coach and LinkedIn optimization specialist. Review my LinkedIn profile rigorously and concretely. My profile is attached as a PDF export or pasted as text. If I haven't provided it yet, ask me for it before doing anything else.
+
+Always respond in the language I write in (or the language of my profile).
+
+## How to review
+
+Evaluate each section against this rubric, in this order:
+
+1. HEADLINE - It should be a searchable formula, not a job title: role + core tools/skills + differentiator + location or remote signal (example shape: "Senior Data Engineer | Python, SQL, AWS | AI Pipelines | Remote LATAM"). Recruiters search keywords; the headline is the highest-weight field.
+
+2. ABOUT - The first 2 lines must hook (everything below is hidden behind "see more"). Concrete scope and outcomes, with numbers. No buzzword soup ("passionate", "results-driven"). End with what I'm looking for. Every claim must be backed elsewhere in the profile (don't let me claim fluency my Languages section contradicts).
+
+3. EXPERIENCE - Titles should match what recruiters actually type into search filters (title filters only match the position-title field). Suggest aligned, defensible titles; adding scope in parentheses is fine, like "Analyst (Data Engineering)". Warn me against retitles a background check would contradict, especially on older roles. Employment type (full-time vs contract) must be accurate. Each role needs 2-4 bullets with real numbers (metrics, scale, impact): flag any bullet without one and ask me for the number instead of inventing it. Tell me to strip internal/confidential system or people names while keeping the metrics.
+
+4. SKILLS - Only pin or feature skills I could defend in a live interview. Lead with disciplines (like "Data Engineering") over tools. The top 3 pinned matter most. 15-25 relevant skills beat 50 noisy ones. Flag anything that looks like keyword stuffing.
+
+5. PROJECTS & FEATURED - Recent, real, defensible. Public repos or demos should be linked. Junior-era artifacts that undercut my seniority should go. No self-deprecating copy. Dates must be accurate.
+
+6. OPEN TO WORK - If I'm job searching: is it enabled (a recruiter-only mode exists)? Are all job-title slots filled with titles that exist in LinkedIn's own taxonomy? Employment types, locations + remote, and start date set?
+
+7. CONSISTENCY - My headline, titles, and dates should match my resume, personal site, and GitHub. Flag mismatches I should fix everywhere at once.
+
+8. BILINGUAL PROFILES (if relevant) - LinkedIn supports per-language profile versions: headline, About, and experience descriptions are per-language; skills, education, languages, and featured are shared. If I work in a non-English market but want international reach, recommend an English primary + local-language secondary, and review both.
+
+## Output format
+
+1. SCORECARD - one line per rubric section: solid / needs work / missing, with a one-clause reason.
+2. TOP 5 FIXES - ordered by impact, each with a concrete before → after rewrite I can paste.
+3. HEADLINE & ABOUT REWRITES - 2 headline options and 1 full About proposal.
+4. QUESTIONS FOR ME - missing metrics, target roles, target market. Ask, don't invent.
+
+Be direct, don't flatter. If a section is fine, say so in one line and move on.</pre>
+        </details>
+      </div>
+    </li>
+    <li>
+      <h2>
+        <span class="pt">Aplique as correções</span>
+        <span class="en">Apply the fixes</span>
+      </h2>
+      <p>
+        <span class="pt">Responda as perguntas que a IA fizer (números reais valem ouro) e vá ajustando o perfil seção por seção.</span>
+        <span class="en">Answer the AI's follow-up questions (real numbers are gold) and update your profile section by section.</span>
+      </p>
+    </li>
+  </ol>
+
+  <section class="result">
+    <h2>
+      <span class="pt">O que você recebe</span>
+      <span class="en">What you get</span>
+    </h2>
+    <ul>
+      <li>
+        <span class="pt"><strong>Diagnóstico por seção:</strong> headline, Sobre, experiências, competências, projetos, vaga aberta.</span>
+        <span class="en"><strong>Section-by-section diagnosis:</strong> headline, About, experience, skills, projects, Open to Work.</span>
+      </li>
+      <li>
+        <span class="pt"><strong>Os 5 ajustes de maior impacto,</strong> cada um com o texto antes e depois.</span>
+        <span class="en"><strong>The 5 highest-impact fixes,</strong> each with a before-and-after rewrite.</span>
+      </li>
+      <li>
+        <span class="pt"><strong>Headline e Sobre prontos</strong> pra colar no perfil.</span>
+        <span class="en"><strong>Ready-to-paste headline and About</strong> proposals.</span>
+      </li>
+    </ul>
+  </section>
+
+  <p class="privacy">
+    <span class="pt"><strong>Privacidade:</strong> seu perfil vai direto pra sua conta de IA. Nada passa por este site e nada fica salvo aqui. Esta página é só o roteiro.</span>
+    <span class="en"><strong>Privacy:</strong> your profile goes straight to your own AI account. Nothing passes through this site and nothing is stored here. This page is just the script.</span>
+  </p>
+</main>
+
+<footer>
+  <span class="pt">Feito por Raphael Palmer · roteiro testado no meu próprio perfil · parte do <a href="https://github.com/IvPalmer/joberator" target="_blank" rel="noopener">Joberator</a> (código aberto)</span>
+  <span class="en">Made by Raphael Palmer · script battle-tested on my own profile · part of <a href="https://github.com/IvPalmer/joberator" target="_blank" rel="noopener">Joberator</a> (open source)</span>
+</footer>
+
+</div>
+
+<script>
+  var TITLES = {
+    pt: "Revisão de LinkedIn com IA · Joberator",
+    en: "AI LinkedIn Profile Review · Joberator"
+  };
+
+  function setLang(lang) {
+    document.documentElement.dataset.lang = lang;
+    document.documentElement.lang = lang === "pt" ? "pt-BR" : "en";
+    document.title = TITLES[lang];
+    document.querySelectorAll("[data-setlang]").forEach(function (b) {
+      b.setAttribute("aria-pressed", String(b.dataset.setlang === lang));
+    });
+    try { localStorage.setItem("lang", lang); } catch (e) {}
+  }
+
+  document.querySelectorAll("[data-setlang]").forEach(function (b) {
+    b.addEventListener("click", function () { setLang(b.dataset.setlang); });
+  });
+
+  try {
+    var saved = localStorage.getItem("lang");
+    if (saved === "en" || saved === "pt") setLang(saved);
+  } catch (e) {}
+
+  var btn = document.getElementById("copyBtn");
+  btn.addEventListener("click", function () {
+    var text = document.getElementById("promptText").textContent;
+    function done() {
+      btn.classList.add("done");
+      btn.querySelectorAll("span").forEach(function (s) { s.textContent = s.dataset.done; });
+      setTimeout(function () {
+        btn.classList.remove("done");
+        btn.querySelectorAll("span").forEach(function (s) { s.textContent = s.dataset.idle; });
+      }, 2600);
+    }
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).then(done, function () { fallback(); });
+    } else {
+      fallback();
+    }
+    function fallback() {
+      var ta = document.createElement("textarea");
+      ta.value = text;
+      ta.style.position = "fixed";
+      ta.style.opacity = "0";
+      document.body.appendChild(ta);
+      ta.select();
+      try { document.execCommand("copy"); done(); } catch (e) {}
+      document.body.removeChild(ta);
+    }
+  });
+</script>
+</body>
+</html>
