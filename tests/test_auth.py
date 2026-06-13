@@ -120,6 +120,12 @@ def run_routing():
     status, _ = _invoke("GET", "/", auth_header=basic("owl", "wrong"))
     assert status == 401, f"/ with wrong creds should be 401, got {status}"
 
+    # HEAD is gated like GET (no more 501): 401 unauth on dashboard, 200 on /guia
+    status, _ = _invoke("HEAD", "/")
+    assert status == 401, f"HEAD / unauth should be 401, got {status}"
+    status, _ = _invoke("HEAD", "/guia")
+    assert status == 200, f"HEAD /guia should be 200, got {status}"
+
     # locked mode: exposed bind, no password -> 503 for private, /guia still public
     kanban.AUTH_ENABLED = False
     kanban.AUTH_PASS = ""

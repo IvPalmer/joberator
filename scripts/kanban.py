@@ -2516,6 +2516,17 @@ class Handler(BaseHTTPRequestHandler):
         else:
             self._html(HTML)
 
+    def do_HEAD(self):
+        # Without this, BaseHTTPRequestHandler answers HEAD with 501 and skips
+        # the auth gate. Gate it like GET; respond headers-only (no body).
+        path = urlparse(self.path).path
+        if not self._gate(path):
+            return
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+
     def do_POST(self):
         path = urlparse(self.path).path
         if not self._gate(path):
