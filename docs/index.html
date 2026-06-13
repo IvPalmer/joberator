@@ -258,6 +258,24 @@
   }
   footer a { color: var(--accent-deep); font-weight: 600; }
 
+  /* desktop: two-column editorial layout, sticky hero rail */
+  @media (min-width: 1024px) {
+    .wrap { max-width: 1180px; }
+    .layout {
+      display: grid;
+      grid-template-columns: minmax(0, 0.82fr) minmax(0, 1.18fr);
+      column-gap: clamp(3rem, 6vw, 7rem);
+    }
+    .rail-inner {
+      position: sticky;
+      top: clamp(2.5rem, 6vh, 4.5rem);
+    }
+    .rail .lede { margin-bottom: 0; }
+    .content .steps { margin-top: 0.4rem; }
+    h1 { font-size: clamp(2.8rem, 3.4vw, 3.9rem); }
+    header { padding-bottom: clamp(3rem, 6vw, 5rem); }
+  }
+
   :is(a, button, summary):focus-visible {
     outline: 3px solid var(--accent);
     outline-offset: 2px;
@@ -281,16 +299,21 @@
   </nav>
 </header>
 
-<main>
-  <h1>
-    <span class="pt">Seu LinkedIn, revisado <em>a sério</em>.</span>
-    <span class="en">Your LinkedIn, reviewed <em>for real</em>.</span>
-  </h1>
-  <p class="lede">
-    <span class="pt">Um roteiro de revisão profissional pra você rodar na <strong>sua própria conta de IA</strong>. Diagnóstico por seção, os 5 ajustes de maior impacto e textos prontos pra colar. <strong>Grátis, uns 10 minutos.</strong></span>
-    <span class="en">A professional review script you run on <strong>your own AI account</strong>. Section-by-section diagnosis, the 5 highest-impact fixes, and ready-to-paste rewrites. <strong>Free, about 10 minutes.</strong></span>
-  </p>
+<main class="layout">
+  <div class="rail">
+    <div class="rail-inner">
+      <h1>
+        <span class="pt">Seu LinkedIn, revisado <em>a sério</em>.</span>
+        <span class="en">Your LinkedIn, reviewed <em>for real</em>.</span>
+      </h1>
+      <p class="lede">
+        <span class="pt">Um roteiro de revisão profissional pra você rodar na <strong>sua própria conta de IA</strong>. Diagnóstico por seção, os 5 ajustes de maior impacto e textos prontos pra colar. <strong>Grátis, uns 10 minutos.</strong></span>
+        <span class="en">A professional review script you run on <strong>your own AI account</strong>. Section-by-section diagnosis, the 5 highest-impact fixes, and ready-to-paste rewrites. <strong>Free, about 10 minutes.</strong></span>
+      </p>
+    </div>
+  </div>
 
+  <div class="content">
   <ol class="steps">
     <li>
       <h2>
@@ -413,6 +436,7 @@ Be direct, don't flatter. If a section is fine, say so in one line and move on.<
     <span class="pt"><strong>Privacidade:</strong> nada do seu perfil passa por este site nem fica salvo aqui; a página é só o roteiro. Seu arquivo é processado pela IA conforme os termos da sua própria conta.</span>
     <span class="en"><strong>Privacy:</strong> none of your profile data passes through this site or is stored here; this page is just the script. Your file is processed by the AI under your own account's terms.</span>
   </p>
+  </div>
 </main>
 
 <footer>
