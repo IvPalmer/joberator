@@ -4,6 +4,8 @@ Run: python scripts/kanban.py
 Opens at http://localhost:5151
 """
 
+import base64
+import hmac
 import json
 import os
 import sys
@@ -31,6 +33,61 @@ DB_PATH = os.path.expanduser("~/.joberator/jobs.db")
 PROFILE_PATH = os.path.expanduser("~/.joberator/profile.json")
 CONFIG_PATH = os.path.expanduser("~/.joberator/config.json")
 PORT = 5151
+
+# --- Auth -------------------------------------------------------------------
+# The dashboard is private. Credentials come from the environment so nothing
+# secret lives in this (public) repo. The public review page at /guia is the
+# only route exempt from auth.
+#
+# Fail-closed when exposed: if the server binds a non-loopback address (i.e. it
+# is reachable beyond this machine) with no password set, every private route
+# returns 503 (see auth_mode) until JOBERATOR_PASS is set — unless
+# JOBERATOR_ALLOW_UNAUTHENTICATED=1 is set explicitly. Loopback binds (local
+# single-user use) stay open with no config.
+HOST = os.environ.get("JOBERATOR_HOST", "127.0.0.1")
+AUTH_USER = os.environ.get("JOBERATOR_USER", "admin")
+AUTH_PASS = os.environ.get("JOBERATOR_PASS", "")
+AUTH_ENABLED = bool(AUTH_PASS)  # enforced once a password is configured
+ALLOW_UNAUTHENTICATED = os.environ.get("JOBERATOR_ALLOW_UNAUTHENTICATED") == "1"
+
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+REVIEW_PAGE_FILE = os.path.join(_REPO_ROOT, "docs", "index.html")
+PUBLIC_PATHS = {"/guia", "/guia/"}
+
+
+def verify_basic_auth(header_value, user, password):
+    """True if an HTTP Basic Authorization header matches the given creds."""
+    if not header_value:
+        return False
+    scheme, _, token = header_value.partition(" ")
+    if scheme.lower() != "basic" or not token:
+        return False
+    try:
+        decoded = base64.b64decode(token, validate=True).decode("utf-8", "replace")
+    except Exception:
+        return False
+    got_user, sep, got_pass = decoded.partition(":")
+    if not sep:
+        return False
+    return hmac.compare_digest(got_user, user) and hmac.compare_digest(got_pass, password)
+
+
+def auth_mode(host, auth_enabled, allow_unauthenticated):
+    """Decide how the dashboard treats unauthenticated requests.
+
+    - "enforce": a password is set; require Basic auth (the normal state).
+    - "open":    loopback bind, or an explicit override; no auth (local use).
+    - "locked":  publicly reachable with no password and no override. The app
+                 still boots, but every private route returns 503 — fail closed
+                 without a crash loop, and the public /guia stays available.
+    """
+    if auth_enabled:
+        return "enforce"
+    exposed = host not in ("127.0.0.1", "localhost", "::1")
+    if not exposed or allow_unauthenticated:
+        return "open"
+    return "locked"
+
 
 VALID_STATUSES = ["interested", "applied", "interviewing", "offered", "rejected", "archived"]
 
@@ -2344,13 +2401,14 @@ class Handler(BaseHTTPRequestHandler):
     def _json(self, data, status=200):
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
-        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Cache-Control", "no-store")
         self.end_headers()
         self.wfile.write(json.dumps(data, default=str).encode())
 
     def _html(self, html):
         self.send_response(200)
         self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Cache-Control", "no-store")
         self.end_headers()
         self.wfile.write(html.encode())
 
@@ -2358,8 +2416,67 @@ class Handler(BaseHTTPRequestHandler):
         length = int(self.headers.get("Content-Length", 0))
         return json.loads(self.rfile.read(length)) if length else {}
 
+    # --- Auth helpers ---
+    def _authorized(self):
+        if not AUTH_ENABLED:
+            return True
+        return verify_basic_auth(self.headers.get("Authorization", ""), AUTH_USER, AUTH_PASS)
+
+    def _challenge(self):
+        """Send a 401 prompting for Basic credentials."""
+        self.send_response(401)
+        self.send_header("WWW-Authenticate", 'Basic realm="Joberator"')
+        self.send_header("Content-Type", "text/plain; charset=utf-8")
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(b"Authentication required")
+
+    def _gate(self, path):
+        """Allow public paths through; otherwise apply the auth mode.
+
+        Returns True if the request may proceed, else sends a 401/503 and
+        returns False (caller must return immediately).
+        """
+        if path in PUBLIC_PATHS:
+            return True
+        mode = auth_mode(HOST, AUTH_ENABLED, ALLOW_UNAUTHENTICATED)
+        if mode == "open":
+            return True
+        if mode == "locked":
+            self.send_response(503)
+            self.send_header("Content-Type", "text/plain; charset=utf-8")
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(b"Dashboard locked: authentication not configured")
+            return False
+        if self._authorized():
+            return True
+        self._challenge()
+        return False
+
+    def _serve_review_page(self):
+        try:
+            with open(REVIEW_PAGE_FILE, "rb") as f:
+                body = f.read()
+        except OSError:
+            self.send_response(404)
+            self.send_header("Content-Type", "text/plain; charset=utf-8")
+            self.end_headers()
+            self.wfile.write(b"Review page not found")
+            return
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.end_headers()
+        self.wfile.write(body)
+
     def do_GET(self):
         path = urlparse(self.path).path
+
+        if path in PUBLIC_PATHS:
+            self._serve_review_page()
+            return
+        if not self._gate(path):
+            return
 
         if path == "/api/jobs":
             self._json(get_jobs())
@@ -2401,6 +2518,8 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         path = urlparse(self.path).path
+        if not self._gate(path):
+            return
 
         if path == "/api/search":
             params = self._read_body()
@@ -2428,6 +2547,8 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_PUT(self):
         path = urlparse(self.path).path
+        if not self._gate(path):
+            return
 
         if path == "/api/config":
             cfg = self._read_body()
@@ -2438,6 +2559,8 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_PATCH(self):
         path = urlparse(self.path).path
+        if not self._gate(path):
+            return
         if path.startswith("/api/jobs/"):
             try:
                 job_id = int(path.split("/")[-1])
@@ -2451,6 +2574,8 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_DELETE(self):
         path = urlparse(self.path).path
+        if not self._gate(path):
+            return
         if path.startswith("/api/jobs/"):
             try:
                 job_id = int(path.split("/")[-1])
@@ -2462,10 +2587,11 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"error": "not found"}, 404)
 
     def do_OPTIONS(self):
+        # Dashboard and API are same-origin; no cross-origin access is granted.
+        path = urlparse(self.path).path
+        if not self._gate(path):
+            return
         self.send_response(204)
-        self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type")
         self.end_headers()
 
 
@@ -2566,12 +2692,28 @@ if __name__ == "__main__":
 
     _ensure_schema()
 
-    # Start cron scheduler in background
-    cron_thread = threading.Thread(target=run_cron_scheduler, daemon=True)
-    cron_thread.start()
-    print("[cron] Scheduler started")
+    _mode = auth_mode(HOST, AUTH_ENABLED, ALLOW_UNAUTHENTICATED)
+    if _mode == "enforce":
+        print(f"[auth] Basic auth enabled (user: {AUTH_USER}). Public page: /guia")
+    elif _mode == "locked":
+        print(
+            "[auth] LOCKED: bound to a public address with no JOBERATOR_PASS — "
+            "the dashboard returns 503 until you set JOBERATOR_USER/JOBERATOR_PASS. "
+            "Only /guia is served. (Set JOBERATOR_ALLOW_UNAUTHENTICATED=1 to override.)"
+        )
+    else:
+        print("[auth] WARNING: no password set — dashboard is UNAUTHENTICATED (loopback only).")
 
-    server = HTTPServer(("127.0.0.1", PORT), Handler)
+    # Start cron scheduler in background — but never while locked, so a
+    # misconfigured public deploy can't run background scrapes.
+    if _mode == "locked":
+        print("[cron] Scheduler disabled while dashboard is locked")
+    else:
+        cron_thread = threading.Thread(target=run_cron_scheduler, daemon=True)
+        cron_thread.start()
+        print("[cron] Scheduler started")
+
+    server = HTTPServer((HOST, PORT), Handler)
     print(f"Joberator Dashboard -> http://localhost:{PORT}")
     webbrowser.open(f"http://localhost:{PORT}")
     try:

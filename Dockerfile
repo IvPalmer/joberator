@@ -6,12 +6,17 @@ RUN pip install --no-cache-dir -r /tmp/req.txt
 
 COPY . .
 
-# Patch kanban.py for container: bind all interfaces, no browser auto-open,
-# and don't exit when DB is empty (let _ensure_schema create it)
-RUN sed -i 's|HTTPServer(("127.0.0.1", PORT)|HTTPServer(("0.0.0.0", PORT)|' scripts/kanban.py && \
-    sed -i 's|^\(\s*\)webbrowser.open|\1#webbrowser.open|' scripts/kanban.py && \
+# Patch kanban.py for container: no browser auto-open, and don't exit when the
+# DB is empty (let _ensure_schema create it). The bind address is set via the
+# JOBERATOR_HOST env below instead of a sed patch.
+RUN sed -i 's|^\(\s*\)webbrowser.open|\1#webbrowser.open|' scripts/kanban.py && \
     sed -i 's|^\(\s*\)exit(1)|\1pass  # patched: allow empty DB|' scripts/kanban.py
 
+# Bind all interfaces so Traefik can reach it. Because this is a non-loopback
+# bind, kanban.py serves 503 for every private route until JOBERATOR_PASS (set
+# in Dokploy) is present — a misconfigured deploy fails closed (only the public
+# /guia page is served) instead of exposing the dashboard.
+ENV JOBERATOR_HOST=0.0.0.0
 ENV PYTHONUNBUFFERED=1
 EXPOSE 5151
 

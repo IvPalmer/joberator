@@ -91,7 +91,7 @@ Opens at `http://localhost:5151`.
 
 A field-tested review rubric for your LinkedIn profile, in two forms:
 
-- **Shareable page** (no install needed): [the review guide](https://ivpalmer.github.io/joberator/) walks anyone through exporting their profile as PDF and running the review on their own claude.ai or ChatGPT account. PT-BR and English.
+- **Shareable page** (no install needed): [the review guide](https://joberator.grooveops.dev/guia) walks anyone through exporting their profile as PDF and running the review on their own claude.ai or ChatGPT account. PT-BR and English. (Source: `docs/index.html`, served at `/guia`.)
 - **Claude skill**: `skills/profile-review/SKILL.md` — ask Claude to review your LinkedIn profile and it applies the same rubric (headline formula, About hook, recruiter title-filter alignment, defensible skills, Open to Work setup, cross-surface consistency).
 
 Your profile data only ever goes to your own AI account; the page is static.
@@ -131,6 +131,15 @@ All data is stored locally in `~/.joberator/`:
 - `jobs.db` — SQLite database with saved jobs and statuses
 - `profile.json` — Your synced LinkedIn profile
 - `config.json` — Search defaults and scheduled search configs
+
+## Dashboard authentication
+
+The dashboard is single-user and private. Behaviour depends on how it's bound:
+
+- **Localhost (default):** no auth — `python scripts/kanban.py` binds `127.0.0.1`, so a local run is open for convenience.
+- **Exposed (`JOBERATOR_HOST=0.0.0.0`, e.g. in Docker/behind a proxy):** set `JOBERATOR_USER` and `JOBERATOR_PASS` to require HTTP Basic Auth. With no password set on a public bind, every private route returns `503` (fail closed) and only the public `/guia` review page is served. Set `JOBERATOR_ALLOW_UNAUTHENTICATED=1` to intentionally run it open (not recommended).
+
+The `/guia` review page is always public; everything else requires the password when exposed.
 
 ## Troubleshooting
 
