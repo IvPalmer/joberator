@@ -1,0 +1,203 @@
+<!doctype html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="description" content="Laboratório local para testar executores de interface determinísticos." />
+    <title>Relay — UI Runner Bench</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Archivo+Black&family=DM+Sans:opsz,wght@9..40,400;9..40,500;9..40,650&display=swap" rel="stylesheet" />
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <div class="grain" aria-hidden="true"></div>
+    <header class="masthead">
+      <a class="brand" href="#" aria-label="Relay UI Runner Bench">
+        <span class="brand-mark">R/</span>
+        <span>RELAY</span>
+      </a>
+      <div class="run-meta">
+        <span class="signal"><i></i> LOCAL</span>
+        <span id="run-id">RUN —</span>
+        <span id="clock">00:00</span>
+      </div>
+    </header>
+
+    <main class="shell">
+      <section class="workspace" aria-labelledby="bench-title">
+        <div class="eyebrow">UI RUNNER BENCH / 01</div>
+        <div class="title-row">
+          <div>
+            <h1 id="bench-title">Teste o agente.<br />Não a sorte.</h1>
+            <p class="lede">Um percurso sintético para medir raciocínio, precisão e recuperação em interfaces reativas.</p>
+          </div>
+          <label class="stress-switch">
+            <input id="stress-mode" type="checkbox" checked />
+            <span class="switch-track"><span></span></span>
+            <span><b>Stress mode</b><small>Re-render + foco instável</small></span>
+          </label>
+        </div>
+
+        <nav class="stepper" aria-label="Etapas do benchmark">
+          <button class="step active" data-step-jump="1"><span>01</span>Escrita</button>
+          <button class="step" data-step-jump="2" disabled><span>02</span>Decisão</button>
+          <button class="step" data-step-jump="3" disabled><span>03</span>Precisão</button>
+          <button class="step" data-step-jump="4" disabled><span>04</span>Relatório</button>
+        </nav>
+
+        <details class="baseline-card" id="baseline-card" open>
+          <summary>
+            <span><i></i> BASELINE HUMANO</span>
+            <strong id="baseline-summary">Ainda não registrado</strong>
+          </summary>
+          <div class="baseline-body">
+            <div class="baseline-copy">
+              <h2>Seu ritmo é a referência.</h2>
+              <p>Escreva um parágrafo espontâneo de 30–120 palavras. O texto não é salvo; somente as métricas de interação ficam no armazenamento local deste navegador.</p>
+              <p class="baseline-prompt"><b>Prompt:</b> explique como uma ferramenta que você usa diariamente melhora o seu trabalho.</p>
+            </div>
+            <div>
+              <label class="field-label" for="baseline-answer">Amostra humana <span><b id="baseline-count">0</b> palavras</span></label>
+              <div class="editor-shell compact">
+                <textarea id="baseline-answer" rows="5" maxlength="900" placeholder="Comece a escrever quando estiver pronto…"></textarea>
+                <div class="editor-footer">
+                  <span id="baseline-live">a medição começa na primeira tecla</span>
+                  <span id="baseline-cadence">— CPM · — CV</span>
+                </div>
+              </div>
+              <p class="inline-error" id="baseline-error" role="alert"></p>
+              <div class="baseline-actions">
+                <button class="button ghost" id="clear-baseline" type="button">Apagar baseline</button>
+                <button class="button primary" id="save-baseline" type="button" disabled>Salvar métricas</button>
+              </div>
+            </div>
+          </div>
+        </details>
+
+        <form id="benchmark-form" novalidate>
+          <section class="panel active" data-panel="1" aria-labelledby="step-1-title">
+            <div class="panel-index">01 / ESCRITA LIVRE + RACIOCÍNIO</div>
+            <h2 id="step-1-title">Preservação sob incerteza</h2>
+            <p class="prompt">Um editor informa <strong>64 palavras</strong>, mas a camada de acessibilidade expõe somente <strong>28</strong>. Qual é a estratégia mais segura para corrigir um erro gramatical sem perder conteúdo?</p>
+
+            <label class="field-label" for="reasoning-answer">Sua resposta <span>25–120 palavras · cadência monitorada localmente</span></label>
+            <div class="editor-shell" id="reasoning-editor">
+              <textarea id="reasoning-answer" rows="7" maxlength="900" placeholder="Explique a estratégia e como verificar o resultado…"></textarea>
+              <div class="editor-footer">
+                <span id="focus-status">pronto para entrada</span>
+                <span><b id="word-count">0</b> / 120 palavras</span>
+              </div>
+            </div>
+            <p class="inline-error" id="reasoning-error" role="alert"></p>
+
+            <label class="honeypot" aria-hidden="true">Não preencher<input id="website-field" tabindex="-1" autocomplete="off" /></label>
+
+            <div class="actions">
+              <button class="button ghost" type="button" data-reset="1">Limpar etapa</button>
+              <button class="button primary" id="to-step-2" type="button">Validar e avançar <span>→</span></button>
+            </div>
+          </section>
+
+          <section class="panel" data-panel="2" aria-labelledby="step-2-title" hidden>
+            <div class="panel-index">02 / ESCOLHA CONTROLADA</div>
+            <h2 id="step-2-title">Depois de um re-render</h2>
+            <p class="prompt">A interface foi atualizada após a última interação. Selecione a próxima ação correta.</p>
+            <div class="choice-grid" role="radiogroup" aria-label="Próxima ação">
+              <button class="choice" type="button" role="radio" aria-checked="false" data-choice="reuse">
+                <span class="choice-key">A</span><b>Reutilizar o alvo anterior</b><small>Economiza uma leitura de estado.</small>
+              </button>
+              <button class="choice" type="button" role="radio" aria-checked="false" data-choice="refresh">
+                <span class="choice-key">B</span><b>Buscar estado atualizado</b><small>Deriva novamente o elemento antes da ação.</small>
+              </button>
+              <button class="choice" type="button" role="radio" aria-checked="false" data-choice="replace">
+                <span class="choice-key">C</span><b>Substituir o formulário</b><small>Reconstrói tudo com o conteúdo disponível.</small>
+              </button>
+            </div>
+            <p class="inline-error" id="choice-error" role="alert"></p>
+            <div class="actions action-order" id="choice-actions">
+              <button class="button ghost" type="button" data-back="1">← Voltar</button>
+              <button class="button primary" id="to-step-3" type="button" disabled>Confirmar escolha <span>→</span></button>
+            </div>
+          </section>
+
+          <section class="panel" data-panel="3" aria-labelledby="step-3-title" hidden>
+            <div class="panel-index">03 / EDIÇÃO DE PRECISÃO</div>
+            <h2 id="step-3-title">Corrija sem reconstruir</h2>
+            <p class="prompt">Corrija apenas os quatro erros destacados pelo sentido: acentuação, concordância, regência e pontuação. Preserve todo o restante.</p>
+            <label class="field-label" for="precision-answer">Texto de teste <span id="precision-baseline">— palavras originais</span></label>
+            <div class="editor-shell compact">
+              <textarea id="precision-answer" rows="6">A automação verificam o estado antes de agir, porque referências antigas pode apontar para controles incorretos. Se o editor mostrar uma contagem maior que o texto acessível a resposta não deve ser reconstruida.</textarea>
+              <div class="editor-footer">
+                <span id="precision-status">conteúdo-base preservado</span>
+                <span><b id="precision-count">0</b> palavras</span>
+              </div>
+            </div>
+            <p class="inline-error" id="precision-error" role="alert"></p>
+            <div class="actions">
+              <button class="button ghost" type="button" data-back="2">← Voltar</button>
+              <button class="button primary" id="finish-run" type="button">Executar auditoria <span>↗</span></button>
+            </div>
+          </section>
+
+          <section class="panel report-panel" data-panel="4" aria-labelledby="step-4-title" hidden>
+            <div class="panel-index">04 / RELATÓRIO LOCAL</div>
+            <h2 id="step-4-title">Resultado da execução</h2>
+            <div class="score-wrap">
+              <div class="score-dial"><strong id="score-value">0</strong><span>/100</span></div>
+              <div><p id="score-label">Calculando…</p><small>O relatório mede resultado e comportamento da interface. Nada é enviado.</small></div>
+            </div>
+            <div class="metrics" id="metrics"></div>
+            <section class="detector-report" id="detector-report" aria-labelledby="detector-report-title">
+              <div>
+                <span>DETECTION LAB</span>
+                <h3 id="detector-report-title">Leitura heurística da sessão</h3>
+              </div>
+              <strong id="detector-report-score">—</strong>
+              <p id="detector-report-copy">Aguardando sinais suficientes.</p>
+              <div class="detector-report-grid" id="detector-report-grid"></div>
+            </section>
+            <section class="run-history" aria-labelledby="run-history-title">
+              <div><span>CALIBRAÇÃO</span><h3 id="run-history-title">Histórico das últimas execuções</h3></div>
+              <div id="run-history-list"></div>
+            </section>
+            <div class="report-actions">
+              <button class="button primary" id="restart-run" type="button">Nova execução <span>↻</span></button>
+              <button class="button ghost" id="export-run" type="button">Exportar JSON</button>
+            </div>
+          </section>
+        </form>
+      </section>
+
+      <aside class="telemetry" aria-labelledby="telemetry-title">
+        <div class="telemetry-head">
+          <div><span>LIVE TRACE</span><h2 id="telemetry-title">Telemetria</h2></div>
+          <button id="clear-log" type="button">limpar</button>
+        </div>
+        <div class="telemetry-stats">
+          <div><span>Eventos</span><b id="event-count">0</b></div>
+          <div><span>Re-renders</span><b id="rerender-count">0</b></div>
+          <div><span>Falhas</span><b id="failure-count">0</b></div>
+        </div>
+        <section class="detection-console" aria-labelledby="detection-title">
+          <div class="detection-head">
+            <div><span>DETECTION LAB</span><h3 id="detection-title">Sinais observáveis</h3></div>
+            <div class="risk-readout"><strong id="detection-score">0</strong><small>/100 risco</small></div>
+          </div>
+          <div class="risk-track" aria-hidden="true"><i id="detection-meter"></i></div>
+          <p class="risk-copy" id="detection-copy">Coletando eventos locais do navegador.</p>
+          <ul class="detector-list" id="detector-list" aria-live="polite"></ul>
+          <p class="privacy-note">Somente eventos e fingerprints agregados. Nenhum texto ou dado sai deste navegador.</p>
+        </section>
+        <ol class="event-log" id="event-log" aria-live="polite"></ol>
+        <div class="legend">
+          <span><i class="ok"></i> ação</span>
+          <span><i class="warn"></i> stressor</span>
+          <span><i class="fail"></i> falha</span>
+        </div>
+      </aside>
+    </main>
+
+    <script src="app.js"></script>
+  </body>
+</html>

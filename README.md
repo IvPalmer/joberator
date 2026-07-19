@@ -96,6 +96,22 @@ A field-tested review rubric for your LinkedIn profile, in two forms:
 
 Your profile data only ever goes to your own AI account; the page is static.
 
+## Relay UI Runner Lab
+
+The repository includes a local, user-owned synthetic UI benchmark for evaluating Computer Use writing, focus recovery, precision editing, and verification:
+
+- **Benchmark:** `ui-lab/` — a static four-stage form with typing telemetry, stress-mode re-renders, a diagnostic Detection Lab, and local run history.
+- **Agent skill:** `skills/relay-ui-runner/` — the validated execution workflow and calibration reference.
+- **Runbook and results:** `ui-lab/README.md` — architecture, metrics, observed runs, limitations, and the next regression plan.
+
+Run the static lab locally without starting the Joberator application stack:
+
+```bash
+python3 -m http.server 4173 --directory ui-lab
+```
+
+Then open `http://127.0.0.1:4173`. The lab stores its baseline and aggregate history only in browser-local storage. It is diagnostic and is not intended for external employment, education, identity, or qualification assessments.
+
 ## Claude Code Integration (Optional)
 
 If you use [Claude Code](https://claude.ai/claude-code), you can add the MCP server for natural language job searching:
@@ -123,6 +139,9 @@ joberator/
   scripts/
     kanban.py               # Dashboard (search + board + settings)
     install.sh              # One-command installer
+  skills/
+    relay-ui-runner/        # Computer Use benchmark workflow
+  ui-lab/                   # Local synthetic UI benchmark
 ```
 
 ## Data Storage

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Relay UI Runner"
+  short_description: "Execute local UI writing benchmarks naturally"
+  default_prompt: "Use $relay-ui-runner to run the open Relay benchmark with natural visible interaction, verify each stage, and stop before any external consequential action."
