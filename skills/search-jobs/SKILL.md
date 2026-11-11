@@ -1,3 +1,8 @@
+---
+name: search-jobs
+description: Search job boards (LinkedIn, Indeed, Glassdoor, ZipRecruiter, Google Jobs) through the joberator-jobs MCP server and present the best matches. Use when the user asks to find or search for jobs.
+---
+
 # Joberator: Job Search
 
 Search for jobs matching the user's criteria using the `joberator-jobs` MCP server.
