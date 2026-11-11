@@ -9,3 +9,9 @@ mcp/.venv/
 node_modules/
 *.pdf
 resume-updates.md
+
+# Separate repo nested here (its own remote; never commit into joberator)
+nordstack-analytics/
+
+# The operator's private application records (this repo is public)
+job-applications/
