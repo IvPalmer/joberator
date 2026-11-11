@@ -17,12 +17,12 @@ A job-search tool: an MCP server (`mcp/job_search_server.py`, server name `jober
 ## Run and verify
 - Compile: `mcp/.venv/bin/python -m py_compile mcp/*.py scripts/kanban.py`.
 - MCP server: `cd mcp && .venv/bin/python job_search_server.py` speaks MCP over stdio; `initialize` then `tools/list` returns its tools.
-- Dashboard: `mcp/.venv/bin/python scripts/kanban.py` binds `127.0.0.1:5151`, open on localhost.
+- Dashboard: `mcp/.venv/bin/python scripts/kanban.py` binds `127.0.0.1:5151`, open on localhost, with the local `~/.joberator` data. The operator's live board is production on the VPS: on `vps-deploy`, RUNTIME.md says how to reach it; do not start a local stack to work on production data.
 - Tests (on `vps-deploy`): `mcp/.venv/bin/python tests/test_auth.py`.
 
 ## Working rules
 - LinkedIn stays read-only: no programmatic profile writes through the Voyager API (terms of service and account-ban risk).
-- Read cookies fresh from the browser on every use and never cache them: calls made with a stale cookie can invalidate the session.
+- Refresh cookies from the browser before LinkedIn calls (`refresh_cookies` rewrites `~/.joberator/cookies.json`) and never reuse a stale copy: calls made with a stale cookie can invalidate the session.
 - Profile sync calls the Voyager API directly (`identity/dash/profiles?decorationId=FullProfileWithEntities-93`); its `included` array mixes entities from several profiles, so filter by `publicIdentifier` and the member URN.
 - Changes go through PRs. Production builds from `vps-deploy` (see docs/STATUS.md).
 
