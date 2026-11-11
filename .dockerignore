@@ -1,0 +1,11 @@
+# Private or local-only material that must never enter the image.
+# Dokploy builds from a clean clone, where none of it exists; this also
+# covers a build run from a working checkout.
+.git
+.claude/
+.agents/
+job-applications/
+nordstack-analytics/
+tmp/
+*.pdf
+resume-updates.md
