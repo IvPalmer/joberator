@@ -1,3 +1,8 @@
+---
+name: profile-review
+description: Review a LinkedIn profile against joberator's field-tested rubric (headline formula, About hook, recruiter title filters, defensible skills, Open to Work, cross-surface consistency) and return prioritized fixes. Use when the user asks to review, audit or improve a LinkedIn profile.
+---
+
 # Joberator: LinkedIn Profile Review
 
 Review the user's LinkedIn profile against a field-tested rubric and produce concrete, prioritized fixes.
