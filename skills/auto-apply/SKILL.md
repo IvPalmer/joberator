@@ -1,3 +1,8 @@
+---
+name: auto-apply
+description: Set up and run joberator's LinkedIn Easy Apply automation (the GodsScion Auto_job_applier_linkedIn bot driving a saved Chrome session). Use when the user asks to auto-apply to LinkedIn jobs or to configure that bot.
+---
+
 # Joberator: Auto Apply
 
 Automate LinkedIn Easy Apply using the GodsScion/Auto_job_applier_linkedIn bot.
