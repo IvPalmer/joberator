@@ -15,3 +15,7 @@ nordstack-analytics/
 
 # The operator's private application records (this repo is public)
 job-applications/
+
+# Local scratch and macOS metadata
+tmp/
+.DS_Store
