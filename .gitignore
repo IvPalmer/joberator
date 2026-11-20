@@ -19,3 +19,6 @@ job-applications/
 # Local scratch and macOS metadata
 tmp/
 .DS_Store
+
+# Private search registry: salary goal and contact names (this repo is public)
+mcp/search_targets.json
